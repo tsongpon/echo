@@ -42,10 +42,6 @@ func (f *fakeEmployeeService) GetByID(_ context.Context, id string) (*model.Empl
 	return nil, service.ErrEmployeeNotFound
 }
 
-func (f *fakeEmployeeService) SendVerification(_ context.Context, _ *model.Employee) error {
-	return nil
-}
-
 func (f *fakeEmployeeService) VerifyEmail(_ context.Context, _ string) error {
 	return f.verifyErr
 }

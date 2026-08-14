@@ -22,7 +22,6 @@ type EmployeeService interface {
 	Register(ctx context.Context, employee *model.Employee) (*model.Employee, error)
 	Login(ctx context.Context, email, password string) (*model.Employee, error)
 	GetByID(ctx context.Context, id string) (*model.Employee, error)
-	SendVerification(ctx context.Context, employee *model.Employee) error
 	VerifyEmail(ctx context.Context, token string) error
 }
 
@@ -59,13 +58,8 @@ func (h *EmployeeHandler) Register(c *echo.Context) error {
 		}
 	}
 
-	// Best-effort: registration has already succeeded. A failure to hand the
-	// token to the mailer must not turn a 201 into a 5xx; the user can still
-	// log in and a resend endpoint can re-issue later.
-	if err := h.employees.SendVerification(c.Request().Context(), created); err != nil {
-		c.Logger().Error("failed to send verification email", "error", err)
-	}
-
+	// The service sends the verification email as part of Register (best-effort);
+	// the handler does not need to orchestrate delivery.
 	return c.JSON(http.StatusCreated, dto.ToEmployeeResponse(created))
 }
 

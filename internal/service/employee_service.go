@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"log"
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
@@ -66,7 +67,10 @@ const maxPasswordLen = 64
 
 // Register creates a new employee after validating the input. The supplied
 // plaintext password is hashed with bcrypt before being persisted; the
-// plaintext is never stored.
+// plaintext is never stored. After a successful create it best-effort sends an
+// email-verification token via the mailer: a delivery failure is logged but
+// does not fail the registration, since the account is already usable and a
+// resend endpoint can re-issue later.
 func (s *EmployeeService) Register(ctx context.Context, employee *model.Employee) (*model.Employee, error) {
 	if employee == nil {
 		return nil, ErrInvalidEmployee("employee must not be nil")
@@ -94,7 +98,15 @@ func (s *EmployeeService) Register(ctx context.Context, employee *model.Employee
 	employee.IsMailVerified = false
 	employee.Password = string(hashed)
 
-	return s.repo.Create(ctx, employee)
+	created, err := s.repo.Create(ctx, employee)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.SendVerification(ctx, created); err != nil {
+		log.Printf("failed to send verification email for employee %q: %v", created.ID, err)
+	}
+	return created, nil
 }
 
 // Login authenticates an employee by email and password. On success it

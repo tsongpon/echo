@@ -127,6 +127,32 @@ func TestRegister_HashesPassword(t *testing.T) {
 	}
 }
 
+func TestRegister_SendsVerification(t *testing.T) {
+	svc, mailer := newTestService()
+
+	created, err := svc.Register(context.Background(), &model.Employee{
+		Name:           "Alice",
+		OrganizationID: "org-1",
+		Email:          "alice@example.com",
+		Password:       "supersecret",
+	})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// Register must hand a verification token to the mailer bound to the
+	// created employee's email.
+	if mailer.lastTo != "alice@example.com" {
+		t.Fatalf("got mailer.to %q, want alice@example.com", mailer.lastTo)
+	}
+	if mailer.lastToken == "" {
+		t.Fatal("expected a non-empty verification token to be handed to the mailer")
+	}
+	if created.IsMailVerified {
+		t.Fatal("newly registered employee should still be unverified; IsMailVerified must be false")
+	}
+}
+
 func TestLogin(t *testing.T) {
 	svc, _ := newTestService()
 
