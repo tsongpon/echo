@@ -33,15 +33,15 @@ the address.
 
 ## Verify Email
 
-`POST /v1/verify-email` — marks the authenticated employee's email as verified
-using a token issued during registration. The endpoint is public; identity is
-established solely from the token, which is bound to a specific employee ID and
-expires after 24 hours.
+`GET /v1/verify-email` — marks the authenticated employee's email as verified
+using a token issued during registration. The endpoint is public and is designed
+to be the target of the verification link sent in the registration email, so the
+token is supplied as the `token` query parameter. Identity is established solely
+from the token, which is bound to a specific employee ID and expires after 24
+hours.
 
 ```bash
-curl -s -w "\nHTTP %{http_code}\n" -X POST http://localhost:1323/v1/verify-email \
-  -H "Content-Type: application/json" \
-  -d '{"token":"<token>"}'
+curl -s -w "\nHTTP %{http_code}\n" "http://localhost:1323/v1/verify-email?token=<token>"
 ```
 
 Expected response: `HTTP 200` with `{"message":"email verified"}`.

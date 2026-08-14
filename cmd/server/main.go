@@ -71,7 +71,7 @@ func main() {
 	})
 	e.POST("/v1/register", employeeHandler.Register)
 	e.POST("/v1/login", employeeHandler.Login)
-	e.POST("/v1/verify-email", employeeHandler.VerifyEmail)
+	e.GET("/v1/verify-email", employeeHandler.VerifyEmail)
 	e.GET("/v1/me", employeeHandler.Me, handler.Auth(tokenSigner))
 
 	if err := e.Start(":" + port); err != nil {

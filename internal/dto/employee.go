@@ -22,11 +22,6 @@ type LoginRequest struct {
 	Password string `json:"password"`
 }
 
-// VerifyEmailRequest is the request body for POST /v1/verify-email.
-type VerifyEmailRequest struct {
-	Token string `json:"token"`
-}
-
 // LoginResponse is returned by POST /v1/login on successful authentication.
 type LoginResponse struct {
 	AccessToken string           `json:"access_token"`

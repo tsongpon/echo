@@ -120,17 +120,16 @@ func (h *EmployeeHandler) Me(c *echo.Context) error {
 	return c.JSON(http.StatusOK, dto.ToEmployeeResponse(employee))
 }
 
-// VerifyEmail handles POST /v1/verify-email: validates the supplied
-// email-verification token and, on success, marks the employee's email as
-// verified. The endpoint is public; identity is established solely from the
-// token, which is bound to a specific employee ID.
+// VerifyEmail handles GET /v1/verify-email: validates the email-verification
+// token supplied in the `token` query parameter and, on success, marks the
+// employee's email as verified. The endpoint is public and is designed to be
+// the target of the verification link sent in the registration email, so it
+// uses GET with a query parameter rather than a request body. Identity is
+// established solely from the token, which is bound to a specific employee ID.
 func (h *EmployeeHandler) VerifyEmail(c *echo.Context) error {
-	var req dto.VerifyEmailRequest
-	if err := c.Bind(&req); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
-	}
+	token := c.QueryParam("token")
 
-	if err := h.employees.VerifyEmail(c.Request().Context(), req.Token); err != nil {
+	if err := h.employees.VerifyEmail(c.Request().Context(), token); err != nil {
 		if errors.Is(err, service.ErrInvalidVerificationToken) {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid or expired verification token")
 		}

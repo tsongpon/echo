@@ -242,32 +242,32 @@ func TestVerifyEmail_Handler(t *testing.T) {
 
 	cases := []struct {
 		name      string
-		body      string
+		token     string
 		verifyErr error
 		wantCode  int
 	}{
 		{
 			name:      "valid token",
-			body:      `{"token":"abc"}`,
+			token:     "abc",
 			verifyErr: nil,
 			wantCode:  http.StatusOK,
 		},
 		{
 			name:      "invalid token",
-			body:      `{"token":"abc"}`,
+			token:     "abc",
 			verifyErr: service.ErrInvalidVerificationToken,
 			wantCode:  http.StatusBadRequest,
 		},
 		{
 			name:      "repository error",
-			body:      `{"token":"abc"}`,
+			token:     "abc",
 			verifyErr: errors.New("db down"),
 			wantCode:  http.StatusInternalServerError,
 		},
 		{
-			name:      "malformed body",
-			body:      `{not-json`,
-			verifyErr: nil,
+			name:      "missing token",
+			token:     "",
+			verifyErr: service.ErrInvalidVerificationToken,
 			wantCode:  http.StatusBadRequest,
 		},
 	}
@@ -277,8 +277,7 @@ func TestVerifyEmail_Handler(t *testing.T) {
 			svc := &fakeEmployeeService{verifyErr: tc.verifyErr}
 			h := NewEmployeeHandler(svc, signer)
 
-			req := httptest.NewRequest(http.MethodPost, "/v1/verify-email", strings.NewReader(tc.body))
-			req.Header.Set("Content-Type", "application/json")
+			req := httptest.NewRequest(http.MethodGet, "/v1/verify-email?token="+tc.token, nil)
 			rec := httptest.NewRecorder()
 
 			e := echo.New()
