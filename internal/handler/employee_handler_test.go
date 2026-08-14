@@ -22,6 +22,8 @@ type fakeEmployeeService struct {
 	byID      map[string]*model.Employee
 	getErr    error
 	verifyErr error
+	loginEmp  *model.Employee
+	loginErr  error
 }
 
 func (f *fakeEmployeeService) Register(_ context.Context, _ *model.Employee) (*model.Employee, error) {
@@ -29,7 +31,7 @@ func (f *fakeEmployeeService) Register(_ context.Context, _ *model.Employee) (*m
 }
 
 func (f *fakeEmployeeService) Login(_ context.Context, _, _ string) (*model.Employee, error) {
-	return nil, errors.New("not implemented")
+	return f.loginEmp, f.loginErr
 }
 
 func (f *fakeEmployeeService) GetByID(_ context.Context, id string) (*model.Employee, error) {
@@ -302,6 +304,105 @@ func TestVerifyEmail_Handler(t *testing.T) {
 			}
 			if he.Code != tc.wantCode {
 				t.Fatalf("got status %d, want %d", he.Code, tc.wantCode)
+			}
+		})
+	}
+}
+
+func TestLogin_Handler(t *testing.T) {
+	signer, err := auth.NewTokenSigner("test-secret", 0)
+	if err != nil {
+		t.Fatalf("NewTokenSigner: %v", err)
+	}
+
+	verifiedEmp := &model.Employee{
+		ID:             "emp-1",
+		Name:           "Alice",
+		OrganizationID: "org-1",
+		Title:          "Engineer",
+		Email:          "alice@example.com",
+		IsMailVerified: true,
+	}
+
+	cases := []struct {
+		name       string
+		body       string
+		loginEmp   *model.Employee
+		loginErr   error
+		wantCode   int
+		wantBodyIn string
+	}{
+		{
+			name:       "success",
+			body:       `{"email":"alice@example.com","password":"supersecret"}`,
+			loginEmp:   verifiedEmp,
+			wantCode:   http.StatusOK,
+			wantBodyIn: "access_token",
+		},
+		{
+			name:       "invalid credentials",
+			body:       `{"email":"alice@example.com","password":"wrong"}`,
+			loginErr:   service.ErrInvalidCredentials,
+			wantCode:   http.StatusUnauthorized,
+			wantBodyIn: "invalid email or password",
+		},
+		{
+			name:       "email not verified",
+			body:       `{"email":"alice@example.com","password":"supersecret"}`,
+			loginErr:   service.ErrEmailNotVerified,
+			wantCode:   http.StatusForbidden,
+			wantBodyIn: "email not verified",
+		},
+		{
+			name:       "internal error",
+			body:       `{"email":"alice@example.com","password":"supersecret"}`,
+			loginErr:   errors.New("db down"),
+			wantCode:   http.StatusInternalServerError,
+			wantBodyIn: "failed to login",
+		},
+		{
+			name:       "malformed body",
+			body:       `{not-json`,
+			wantCode:   http.StatusBadRequest,
+			wantBodyIn: "invalid request body",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &fakeEmployeeService{loginEmp: tc.loginEmp, loginErr: tc.loginErr}
+			h := NewEmployeeHandler(svc, signer)
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/login", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+
+			e := echo.New()
+			c := e.NewContext(req, rec)
+
+			err := h.Login(c)
+			if tc.wantCode == http.StatusOK {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if rec.Code != tc.wantCode {
+					t.Fatalf("got status %d, want %d", rec.Code, tc.wantCode)
+				}
+				if !strings.Contains(rec.Body.String(), tc.wantBodyIn) {
+					t.Fatalf("expected %q in body, got %s", tc.wantBodyIn, rec.Body.String())
+				}
+				return
+			}
+
+			he, ok := err.(*echo.HTTPError)
+			if !ok {
+				t.Fatalf("expected *echo.HTTPError, got %T: %v", err, err)
+			}
+			if he.Code != tc.wantCode {
+				t.Fatalf("got status %d, want %d", he.Code, tc.wantCode)
+			}
+			if he.Message != tc.wantBodyIn {
+				t.Fatalf("expected message %q, got %v", tc.wantBodyIn, he.Message)
 			}
 		})
 	}

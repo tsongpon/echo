@@ -20,6 +20,12 @@ var ErrEmployeeNotFound = errors.New("employee not found")
 // supplied email/password do not match a stored employee.
 var ErrInvalidCredentials = errors.New("invalid email or password")
 
+// ErrEmailNotVerified is returned by Login when the credentials are valid but
+// the employee's email has not been verified yet. It is distinct from
+// ErrInvalidCredentials so the handler can respond with an actionable message
+// rather than a generic auth failure.
+var ErrEmailNotVerified = errors.New("email not verified")
+
 // ErrInvalidVerificationToken is returned by VerifyEmail when the supplied
 // token is malformed, expired, or does not correspond to a known employee. A
 // single sentinel for all failure modes avoids leaking why a token was
@@ -115,9 +121,14 @@ func (s *EmployeeService) Register(ctx context.Context, employee *model.Employee
 }
 
 // Login authenticates an employee by email and password. On success it
-// returns the matching employee; on any failure (unknown email or wrong
-// password) it returns ErrInvalidCredentials. A single error for both cases
-// avoids leaking which of the two was wrong.
+// returns the matching employee; on any credential failure (unknown email or
+// wrong password) it returns ErrInvalidCredentials. A single error for both
+// cases avoids leaking which of the two was wrong.
+//
+// If the credentials are valid but the employee's email is not yet verified,
+// Login returns ErrEmailNotVerified. The verification status is only checked
+// after the password is confirmed, so an attacker without the password cannot
+// learn whether an account exists or is unverified.
 func (s *EmployeeService) Login(ctx context.Context, email, password string) (*model.Employee, error) {
 	if strings.TrimSpace(email) == "" || password == "" {
 		return nil, ErrInvalidCredentials
@@ -130,6 +141,10 @@ func (s *EmployeeService) Login(ctx context.Context, email, password string) (*m
 
 	if err := bcrypt.CompareHashAndPassword([]byte(employee.Password), []byte(password)); err != nil {
 		return nil, ErrInvalidCredentials
+	}
+
+	if !employee.IsMailVerified {
+		return nil, ErrEmailNotVerified
 	}
 
 	return employee, nil

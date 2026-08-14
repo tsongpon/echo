@@ -71,6 +71,10 @@ Expected response: `HTTP 200` with an `access_token` (JWT, HS256),
 Invalid email or wrong password returns `HTTP 401` with
 `{"message":"invalid email or password"}`.
 
+If the credentials are valid but the employee's email has not been verified yet,
+login returns `HTTP 403` with `{"message":"email not verified"}`. Verify the
+email via `POST /v1/verify-email` (above) first, then retry login.
+
 ## Get Current Employee Profile
 
 `GET /v1/me` — returns the profile of the authenticated employee. Requires a

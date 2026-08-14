@@ -161,7 +161,7 @@ func TestLogin(t *testing.T) {
 	svc, _ := newTestService()
 
 	const plaintext = "supersecret"
-	_, err := svc.Register(context.Background(), &model.Employee{
+	created, err := svc.Register(context.Background(), &model.Employee{
 		Name:           "Alice",
 		OrganizationID: "org-1",
 		Email:          "alice@example.com",
@@ -169,6 +169,14 @@ func TestLogin(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Register: unexpected error: %v", err)
+	}
+	// Verify the email so the success-path subtests can log in.
+	token, err := testSigner(t, 0).Sign(created)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if err := svc.VerifyEmail(context.Background(), token); err != nil {
+		t.Fatalf("VerifyEmail: %v", err)
 	}
 
 	t.Run("valid credentials", func(t *testing.T) {
@@ -207,6 +215,24 @@ func TestLogin(t *testing.T) {
 		}
 		if _, err := svc.Login(context.Background(), "a@example.com", ""); err == nil {
 			t.Fatalf("expected error for empty password")
+		}
+	})
+
+	t.Run("unverified email is rejected", func(t *testing.T) {
+		svc, _ := newTestService()
+		const pw = "supersecret"
+		if _, err := svc.Register(context.Background(), &model.Employee{
+			Name:           "Bob",
+			OrganizationID: "org-1",
+			Email:          "bob@example.com",
+			Password:       pw,
+		}); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+
+		_, err := svc.Login(context.Background(), "bob@example.com", pw)
+		if !errors.Is(err, ErrEmailNotVerified) {
+			t.Fatalf("expected ErrEmailNotVerified, got %v", err)
 		}
 	})
 }

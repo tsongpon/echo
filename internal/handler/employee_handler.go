@@ -71,17 +71,21 @@ func (h *EmployeeHandler) Login(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
 
-	employee, err := h.employees.Login(c.Request().Context(), req.Email, req.Password)
+	result, err := h.employees.Login(c.Request().Context(), req.Email, req.Password)
 	if err != nil {
 		// Treat unknown email and wrong password identically to avoid
-		// leaking which one was wrong.
-		if errors.Is(err, service.ErrInvalidCredentials) {
+		// leaking which one was wrong. An unverified account is reported only
+		// after the password is confirmed, with a distinct, actionable error.
+		switch {
+		case errors.Is(err, service.ErrInvalidCredentials):
 			return echo.NewHTTPError(http.StatusUnauthorized, "invalid email or password")
+		case errors.Is(err, service.ErrEmailNotVerified):
+			return echo.NewHTTPError(http.StatusForbidden, "email not verified")
 		}
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to login")
 	}
 
-	token, err := h.tokens.Sign(employee)
+	token, err := h.tokens.Sign(result)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to issue token")
 	}
@@ -90,7 +94,7 @@ func (h *EmployeeHandler) Login(c *echo.Context) error {
 		AccessToken: token,
 		TokenType:   "Bearer",
 		ExpiresIn:   int(h.tokens.TTL().Seconds()),
-		Employee:    dto.ToEmployeeResponse(employee),
+		Employee:    dto.ToEmployeeResponse(result),
 	})
 }
 
