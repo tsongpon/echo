@@ -10,9 +10,9 @@ import (
 
 	"github.com/labstack/echo/v5"
 
+	"github.com/tsongpon/echo/internal/apperror"
 	"github.com/tsongpon/echo/internal/auth"
 	"github.com/tsongpon/echo/internal/model"
-	"github.com/tsongpon/echo/internal/service"
 )
 
 // fakeEmployeeService is an in-test stand-in for the handler.EmployeeService
@@ -41,7 +41,7 @@ func (f *fakeEmployeeService) GetByID(_ context.Context, id string) (*model.Empl
 	if e, ok := f.byID[id]; ok {
 		return e, nil
 	}
-	return nil, service.ErrEmployeeNotFound
+	return nil, apperror.ErrEmployeeNotFound
 }
 
 func (f *fakeEmployeeService) VerifyEmail(_ context.Context, _ string) error {
@@ -255,7 +255,7 @@ func TestVerifyEmail_Handler(t *testing.T) {
 		{
 			name:      "invalid token",
 			token:     "abc",
-			verifyErr: service.ErrInvalidVerificationToken,
+			verifyErr: apperror.ErrInvalidVerificationToken,
 			wantCode:  http.StatusBadRequest,
 		},
 		{
@@ -267,7 +267,7 @@ func TestVerifyEmail_Handler(t *testing.T) {
 		{
 			name:      "missing token",
 			token:     "",
-			verifyErr: service.ErrInvalidVerificationToken,
+			verifyErr: apperror.ErrInvalidVerificationToken,
 			wantCode:  http.StatusBadRequest,
 		},
 	}
@@ -341,14 +341,14 @@ func TestLogin_Handler(t *testing.T) {
 		{
 			name:       "invalid credentials",
 			body:       `{"email":"alice@example.com","password":"wrong"}`,
-			loginErr:   service.ErrInvalidCredentials,
+			loginErr:   apperror.ErrInvalidCredentials,
 			wantCode:   http.StatusUnauthorized,
 			wantBodyIn: "invalid email or password",
 		},
 		{
 			name:       "email not verified",
 			body:       `{"email":"alice@example.com","password":"supersecret"}`,
-			loginErr:   service.ErrEmailNotVerified,
+			loginErr:   apperror.ErrEmailNotVerified,
 			wantCode:   http.StatusForbidden,
 			wantBodyIn: "email not verified",
 		},

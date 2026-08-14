@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/tsongpon/echo/internal/apperror"
 	"github.com/tsongpon/echo/internal/auth"
 	"github.com/tsongpon/echo/internal/model"
 )
@@ -41,22 +42,22 @@ func (f *fakeRepo) Create(_ context.Context, employee *model.Employee) (*model.E
 
 func (f *fakeRepo) GetByEmail(_ context.Context, email string) (*model.Employee, error) {
 	if f.byEmail == nil {
-		return nil, ErrEmployeeNotFound
+		return nil, apperror.ErrEmployeeNotFound
 	}
 	if e, ok := f.byEmail[strings.ToLower(email)]; ok {
 		return e, nil
 	}
-	return nil, ErrEmployeeNotFound
+	return nil, apperror.ErrEmployeeNotFound
 }
 
 func (f *fakeRepo) GetByID(_ context.Context, id string) (*model.Employee, error) {
 	if f.byID == nil {
-		return nil, ErrEmployeeNotFound
+		return nil, apperror.ErrEmployeeNotFound
 	}
 	if e, ok := f.byID[id]; ok {
 		return e, nil
 	}
-	return nil, ErrEmployeeNotFound
+	return nil, apperror.ErrEmployeeNotFound
 }
 
 func (f *fakeRepo) Update(_ context.Context, employee *model.Employee) (*model.Employee, error) {
@@ -197,15 +198,15 @@ func TestLogin(t *testing.T) {
 
 	t.Run("wrong password", func(t *testing.T) {
 		_, err := svc.Login(context.Background(), "alice@example.com", "wrong")
-		if !errors.Is(err, ErrInvalidCredentials) {
-			t.Fatalf("expected ErrInvalidCredentials, got %v", err)
+		if !errors.Is(err, apperror.ErrInvalidCredentials) {
+			t.Fatalf("expected apperror.ErrInvalidCredentials, got %v", err)
 		}
 	})
 
 	t.Run("unknown email", func(t *testing.T) {
 		_, err := svc.Login(context.Background(), "nobody@example.com", plaintext)
-		if !errors.Is(err, ErrInvalidCredentials) {
-			t.Fatalf("expected ErrInvalidCredentials, got %v", err)
+		if !errors.Is(err, apperror.ErrInvalidCredentials) {
+			t.Fatalf("expected apperror.ErrInvalidCredentials, got %v", err)
 		}
 	})
 
@@ -231,8 +232,8 @@ func TestLogin(t *testing.T) {
 		}
 
 		_, err := svc.Login(context.Background(), "bob@example.com", pw)
-		if !errors.Is(err, ErrEmailNotVerified) {
-			t.Fatalf("expected ErrEmailNotVerified, got %v", err)
+		if !errors.Is(err, apperror.ErrEmailNotVerified) {
+			t.Fatalf("expected apperror.ErrEmailNotVerified, got %v", err)
 		}
 	})
 }
@@ -265,15 +266,15 @@ func TestGetByID(t *testing.T) {
 
 	t.Run("unknown id", func(t *testing.T) {
 		_, err := svc.GetByID(context.Background(), "does-not-exist")
-		if !errors.Is(err, ErrEmployeeNotFound) {
-			t.Fatalf("expected ErrEmployeeNotFound, got %v", err)
+		if !errors.Is(err, apperror.ErrEmployeeNotFound) {
+			t.Fatalf("expected apperror.ErrEmployeeNotFound, got %v", err)
 		}
 	})
 
 	t.Run("empty id", func(t *testing.T) {
 		_, err := svc.GetByID(context.Background(), "")
-		if !errors.Is(err, ErrEmployeeNotFound) {
-			t.Fatalf("expected ErrEmployeeNotFound, got %v", err)
+		if !errors.Is(err, apperror.ErrEmployeeNotFound) {
+			t.Fatalf("expected apperror.ErrEmployeeNotFound, got %v", err)
 		}
 	})
 }
@@ -344,7 +345,7 @@ func TestRegister_ValidationErrors(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected validation error, got nil")
 			}
-			if !IsInvalidEmployee(err) {
+			if !apperror.IsInvalidEmployee(err) {
 				t.Fatalf("expected ErrInvalidEmployee, got %T: %v", err, err)
 			}
 			if err.Error() != tc.wantMsg {
@@ -437,15 +438,15 @@ func TestVerifyEmail(t *testing.T) {
 
 	t.Run("empty token", func(t *testing.T) {
 		svc, _, _ := setup(t)
-		if err := svc.VerifyEmail(context.Background(), ""); !errors.Is(err, ErrInvalidVerificationToken) {
-			t.Fatalf("expected ErrInvalidVerificationToken, got %v", err)
+		if err := svc.VerifyEmail(context.Background(), ""); !errors.Is(err, apperror.ErrInvalidVerificationToken) {
+			t.Fatalf("expected apperror.ErrInvalidVerificationToken, got %v", err)
 		}
 	})
 
 	t.Run("garbage token", func(t *testing.T) {
 		svc, _, _ := setup(t)
-		if err := svc.VerifyEmail(context.Background(), "not-a-jwt"); !errors.Is(err, ErrInvalidVerificationToken) {
-			t.Fatalf("expected ErrInvalidVerificationToken, got %v", err)
+		if err := svc.VerifyEmail(context.Background(), "not-a-jwt"); !errors.Is(err, apperror.ErrInvalidVerificationToken) {
+			t.Fatalf("expected apperror.ErrInvalidVerificationToken, got %v", err)
 		}
 	})
 
@@ -460,8 +461,8 @@ func TestVerifyEmail(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Sign: %v", err)
 		}
-		if err := svc.VerifyEmail(context.Background(), accessToken); !errors.Is(err, ErrInvalidVerificationToken) {
-			t.Fatalf("expected ErrInvalidVerificationToken, got %v", err)
+		if err := svc.VerifyEmail(context.Background(), accessToken); !errors.Is(err, apperror.ErrInvalidVerificationToken) {
+			t.Fatalf("expected apperror.ErrInvalidVerificationToken, got %v", err)
 		}
 	})
 
@@ -472,8 +473,8 @@ func TestVerifyEmail(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Sign: %v", err)
 		}
-		if err := svc.VerifyEmail(context.Background(), token); !errors.Is(err, ErrInvalidVerificationToken) {
-			t.Fatalf("expected ErrInvalidVerificationToken, got %v", err)
+		if err := svc.VerifyEmail(context.Background(), token); !errors.Is(err, apperror.ErrInvalidVerificationToken) {
+			t.Fatalf("expected apperror.ErrInvalidVerificationToken, got %v", err)
 		}
 	})
 
@@ -490,8 +491,8 @@ func TestVerifyEmail(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 
-		if err := svc.VerifyEmail(context.Background(), token); !errors.Is(err, ErrInvalidVerificationToken) {
-			t.Fatalf("expected ErrInvalidVerificationToken, got %v", err)
+		if err := svc.VerifyEmail(context.Background(), token); !errors.Is(err, apperror.ErrInvalidVerificationToken) {
+			t.Fatalf("expected apperror.ErrInvalidVerificationToken, got %v", err)
 		}
 	})
 }

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tsongpon/echo/internal/apperror"
 	"github.com/tsongpon/echo/internal/model"
 	"github.com/tsongpon/echo/internal/service"
 )
@@ -59,10 +60,10 @@ func (r *EmployeeInMemoryRepository) Create(ctx context.Context, employee *model
 }
 
 // GetByEmail returns the employee with the given email. Email comparison is
-// case-insensitive. Returns service.ErrEmployeeNotFound when no match exists.
+// case-insensitive. Returns apperror.ErrEmployeeNotFound when no match exists.
 func (r *EmployeeInMemoryRepository) GetByEmail(_ context.Context, email string) (*model.Employee, error) {
 	if email == "" {
-		return nil, service.ErrEmployeeNotFound
+		return nil, apperror.ErrEmployeeNotFound
 	}
 
 	target := strings.ToLower(strings.TrimSpace(email))
@@ -76,14 +77,14 @@ func (r *EmployeeInMemoryRepository) GetByEmail(_ context.Context, email string)
 			return &result, nil
 		}
 	}
-	return nil, service.ErrEmployeeNotFound
+	return nil, apperror.ErrEmployeeNotFound
 }
 
 // GetByID returns the employee with the given ID. Returns
-// service.ErrEmployeeNotFound when no match exists.
+// apperror.ErrEmployeeNotFound when no match exists.
 func (r *EmployeeInMemoryRepository) GetByID(_ context.Context, id string) (*model.Employee, error) {
 	if id == "" {
-		return nil, service.ErrEmployeeNotFound
+		return nil, apperror.ErrEmployeeNotFound
 	}
 
 	r.mu.RLock()
@@ -91,7 +92,7 @@ func (r *EmployeeInMemoryRepository) GetByID(_ context.Context, id string) (*mod
 
 	stored, ok := r.employees[id]
 	if !ok {
-		return nil, service.ErrEmployeeNotFound
+		return nil, apperror.ErrEmployeeNotFound
 	}
 
 	result := *stored
@@ -100,13 +101,13 @@ func (r *EmployeeInMemoryRepository) GetByID(_ context.Context, id string) (*mod
 
 // Update overwrites the mutable fields of the stored employee with the given
 // ID and returns the updated record. ID and CreatedAt are preserved; UpdatedAt
-// is refreshed. Returns service.ErrEmployeeNotFound when the ID is unknown.
+// is refreshed. Returns apperror.ErrEmployeeNotFound when the ID is unknown.
 func (r *EmployeeInMemoryRepository) Update(_ context.Context, employee *model.Employee) (*model.Employee, error) {
 	if employee == nil {
 		return nil, ErrNilEmployee
 	}
 	if employee.ID == "" {
-		return nil, service.ErrEmployeeNotFound
+		return nil, apperror.ErrEmployeeNotFound
 	}
 
 	r.mu.Lock()
@@ -114,7 +115,7 @@ func (r *EmployeeInMemoryRepository) Update(_ context.Context, employee *model.E
 
 	stored, ok := r.employees[employee.ID]
 	if !ok {
-		return nil, service.ErrEmployeeNotFound
+		return nil, apperror.ErrEmployeeNotFound
 	}
 
 	stored.Name = employee.Name

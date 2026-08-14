@@ -2,35 +2,15 @@ package service
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/tsongpon/echo/internal/apperror"
 	"github.com/tsongpon/echo/internal/auth"
 	"github.com/tsongpon/echo/internal/model"
 )
-
-// ErrEmployeeNotFound is returned by repository lookups when no employee
-// matches the query.
-var ErrEmployeeNotFound = errors.New("employee not found")
-
-// ErrInvalidCredentials is returned by authentication operations when the
-// supplied email/password do not match a stored employee.
-var ErrInvalidCredentials = errors.New("invalid email or password")
-
-// ErrEmailNotVerified is returned by Login when the credentials are valid but
-// the employee's email has not been verified yet. It is distinct from
-// ErrInvalidCredentials so the handler can respond with an actionable message
-// rather than a generic auth failure.
-var ErrEmailNotVerified = errors.New("email not verified")
-
-// ErrInvalidVerificationToken is returned by VerifyEmail when the supplied
-// token is malformed, expired, or does not correspond to a known employee. A
-// single sentinel for all failure modes avoids leaking why a token was
-// rejected.
-var ErrInvalidVerificationToken = errors.New("invalid or expired verification token")
 
 // Mailer is the consumer-defined contract for sending transactional email. It
 // is intentionally minimal: only the operations the service actually needs.
@@ -84,22 +64,22 @@ const maxPasswordLen = 64
 // resend endpoint can re-issue later.
 func (s *EmployeeService) Register(ctx context.Context, employee *model.Employee) (*model.Employee, error) {
 	if employee == nil {
-		return nil, ErrInvalidEmployee("employee must not be nil")
+		return nil, apperror.ErrInvalidEmployee("employee must not be nil")
 	}
 	if strings.TrimSpace(employee.Name) == "" {
-		return nil, ErrInvalidEmployee("name is required")
+		return nil, apperror.ErrInvalidEmployee("name is required")
 	}
 	if strings.TrimSpace(employee.Email) == "" {
-		return nil, ErrInvalidEmployee("email is required")
+		return nil, apperror.ErrInvalidEmployee("email is required")
 	}
 	if strings.TrimSpace(employee.OrganizationID) == "" {
-		return nil, ErrInvalidEmployee("organization_id is required")
+		return nil, apperror.ErrInvalidEmployee("organization_id is required")
 	}
 	if employee.Password == "" {
-		return nil, ErrInvalidEmployee("password is required")
+		return nil, apperror.ErrInvalidEmployee("password is required")
 	}
 	if len(employee.Password) > maxPasswordLen {
-		return nil, ErrInvalidEmployee("password must be at most 64 characters")
+		return nil, apperror.ErrInvalidEmployee("password must be at most 64 characters")
 	}
 
 	hashed, err := bcrypt.GenerateFromPassword([]byte(employee.Password), bcrypt.DefaultCost)
@@ -122,36 +102,36 @@ func (s *EmployeeService) Register(ctx context.Context, employee *model.Employee
 
 // Login authenticates an employee by email and password. On success it
 // returns the matching employee; on any credential failure (unknown email or
-// wrong password) it returns ErrInvalidCredentials. A single error for both
-// cases avoids leaking which of the two was wrong.
+// wrong password) it returns apperror.ErrInvalidCredentials. A single error
+// for both cases avoids leaking which of the two was wrong.
 //
 // If the credentials are valid but the employee's email is not yet verified,
-// Login returns ErrEmailNotVerified. The verification status is only checked
-// after the password is confirmed, so an attacker without the password cannot
-// learn whether an account exists or is unverified.
+// Login returns apperror.ErrEmailNotVerified. The verification status is only
+// checked after the password is confirmed, so an attacker without the password
+// cannot learn whether an account exists or is unverified.
 func (s *EmployeeService) Login(ctx context.Context, email, password string) (*model.Employee, error) {
 	if strings.TrimSpace(email) == "" || password == "" {
-		return nil, ErrInvalidCredentials
+		return nil, apperror.ErrInvalidCredentials
 	}
 
 	employee, err := s.repo.GetByEmail(ctx, email)
 	if err != nil {
-		return nil, ErrInvalidCredentials
+		return nil, apperror.ErrInvalidCredentials
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(employee.Password), []byte(password)); err != nil {
-		return nil, ErrInvalidCredentials
+		return nil, apperror.ErrInvalidCredentials
 	}
 
 	if !employee.IsMailVerified {
-		return nil, ErrEmailNotVerified
+		return nil, apperror.ErrEmailNotVerified
 	}
 
 	return employee, nil
 }
 
 // GetByID returns the employee with the given ID. It returns
-// ErrEmployeeNotFound when no employee matches.
+// apperror.ErrEmployeeNotFound when no employee matches.
 func (s *EmployeeService) GetByID(ctx context.Context, id string) (*model.Employee, error) {
 	return s.repo.GetByID(ctx, id)
 }
@@ -161,7 +141,7 @@ func (s *EmployeeService) GetByID(ctx context.Context, id string) (*model.Employ
 // signed JWT); nothing is stored server-side.
 func (s *EmployeeService) SendVerification(ctx context.Context, employee *model.Employee) error {
 	if employee == nil {
-		return ErrInvalidEmployee("employee must not be nil")
+		return apperror.ErrInvalidEmployee("employee must not be nil")
 	}
 	token, err := s.verifySigner.Sign(employee)
 	if err != nil {
@@ -172,20 +152,22 @@ func (s *EmployeeService) SendVerification(ctx context.Context, employee *model.
 
 // VerifyEmail validates the supplied verification token and, on success, marks
 // the corresponding employee's email as verified. It is idempotent: verifying
-// an already-verified employee is a no-op that still succeeds.
+// an already-verified employee is a no-op that still succeeds. Any token
+// failure (malformed, expired, wrong-key, or unknown employee) is reported as
+// apperror.ErrInvalidVerificationToken.
 func (s *EmployeeService) VerifyEmail(ctx context.Context, token string) error {
 	if strings.TrimSpace(token) == "" {
-		return ErrInvalidVerificationToken
+		return apperror.ErrInvalidVerificationToken
 	}
 
 	claims, err := s.verifySigner.Verify(token)
 	if err != nil {
-		return ErrInvalidVerificationToken
+		return apperror.ErrInvalidVerificationToken
 	}
 
 	employee, err := s.repo.GetByID(ctx, claims.Subject)
 	if err != nil {
-		return ErrInvalidVerificationToken
+		return apperror.ErrInvalidVerificationToken
 	}
 
 	employee.IsMailVerified = true
@@ -193,15 +175,4 @@ func (s *EmployeeService) VerifyEmail(ctx context.Context, token string) error {
 		return err
 	}
 	return nil
-}
-
-// ErrInvalidEmployee indicates a validation failure of an employee input.
-type ErrInvalidEmployee string
-
-func (e ErrInvalidEmployee) Error() string { return string(e) }
-
-// IsInvalidEmployee reports whether err is an ErrInvalidEmployee.
-func IsInvalidEmployee(err error) bool {
-	var target ErrInvalidEmployee
-	return errors.As(err, &target)
 }

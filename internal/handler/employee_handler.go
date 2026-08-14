@@ -7,11 +7,10 @@ import (
 
 	"github.com/labstack/echo/v5"
 
+	"github.com/tsongpon/echo/internal/apperror"
 	"github.com/tsongpon/echo/internal/auth"
 	"github.com/tsongpon/echo/internal/dto"
 	"github.com/tsongpon/echo/internal/model"
-	"github.com/tsongpon/echo/internal/repository"
-	"github.com/tsongpon/echo/internal/service"
 )
 
 // EmployeeService is the consumer-defined contract for the employee
@@ -47,15 +46,11 @@ func (h *EmployeeHandler) Register(c *echo.Context) error {
 
 	created, err := h.employees.Register(c.Request().Context(), req.ToEmployee())
 	if err != nil {
-		var invalid service.ErrInvalidEmployee
-		switch {
-		case errors.As(err, &invalid):
+		var invalid apperror.ErrInvalidEmployee
+		if errors.As(err, &invalid) {
 			return echo.NewHTTPError(http.StatusBadRequest, invalid.Error())
-		case errors.Is(err, repository.ErrNilEmployee):
-			return echo.NewHTTPError(http.StatusBadRequest, invalid.Error())
-		default:
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to register employee")
 		}
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to register employee")
 	}
 
 	// The service sends the verification email as part of Register (best-effort);
@@ -77,9 +72,9 @@ func (h *EmployeeHandler) Login(c *echo.Context) error {
 		// leaking which one was wrong. An unverified account is reported only
 		// after the password is confirmed, with a distinct, actionable error.
 		switch {
-		case errors.Is(err, service.ErrInvalidCredentials):
+		case errors.Is(err, apperror.ErrInvalidCredentials):
 			return echo.NewHTTPError(http.StatusUnauthorized, "invalid email or password")
-		case errors.Is(err, service.ErrEmailNotVerified):
+		case errors.Is(err, apperror.ErrEmailNotVerified):
 			return echo.NewHTTPError(http.StatusForbidden, "email not verified")
 		}
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to login")
@@ -111,7 +106,7 @@ func (h *EmployeeHandler) Me(c *echo.Context) error {
 
 	employee, err := h.employees.GetByID(c.Request().Context(), claims.Subject)
 	if err != nil {
-		if errors.Is(err, service.ErrEmployeeNotFound) {
+		if errors.Is(err, apperror.ErrEmployeeNotFound) {
 			return echo.NewHTTPError(http.StatusNotFound, "employee not found")
 		}
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to fetch employee")
@@ -130,7 +125,7 @@ func (h *EmployeeHandler) VerifyEmail(c *echo.Context) error {
 	token := c.QueryParam("token")
 
 	if err := h.employees.VerifyEmail(c.Request().Context(), token); err != nil {
-		if errors.Is(err, service.ErrInvalidVerificationToken) {
+		if errors.Is(err, apperror.ErrInvalidVerificationToken) {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid or expired verification token")
 		}
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to verify email")
