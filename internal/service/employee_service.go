@@ -3,7 +3,7 @@ package service
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
@@ -51,12 +51,17 @@ type EmployeeService struct {
 	repo         EmployeeRepository
 	mailer       Mailer
 	verifySigner *auth.EmailVerificationTokenSigner
+	logger       *slog.Logger
 }
 
 // NewEmployeeService creates an EmployeeService backed by the given
-// repository, mailer, and email-verification token signer.
-func NewEmployeeService(repo EmployeeRepository, mailer Mailer, verifySigner *auth.EmailVerificationTokenSigner) *EmployeeService {
-	return &EmployeeService{repo: repo, mailer: mailer, verifySigner: verifySigner}
+// repository, mailer, and email-verification token signer. If logger is nil,
+// slog.Default() is used.
+func NewEmployeeService(repo EmployeeRepository, mailer Mailer, verifySigner *auth.EmailVerificationTokenSigner, logger *slog.Logger) *EmployeeService {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &EmployeeService{repo: repo, mailer: mailer, verifySigner: verifySigner, logger: logger}
 }
 
 // maxPasswordLen caps the incoming plaintext password length before
@@ -104,7 +109,7 @@ func (s *EmployeeService) Register(ctx context.Context, employee *model.Employee
 	}
 
 	if err := s.SendVerification(ctx, created); err != nil {
-		log.Printf("failed to send verification email for employee %q: %v", created.ID, err)
+		s.logger.Error("failed to send verification email", "error", err, "employee_id", created.ID)
 	}
 	return created, nil
 }

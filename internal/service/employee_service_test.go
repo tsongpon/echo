@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -84,7 +86,9 @@ func newTestService() (*EmployeeService, *noopMailer) {
 		panic(err)
 	}
 	m := &noopMailer{}
-	return NewEmployeeService(&fakeRepo{}, m, signer), m
+	// Discard log output so service tests stay quiet.
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return NewEmployeeService(&fakeRepo{}, m, signer, logger), m
 }
 
 func TestRegister_HashesPassword(t *testing.T) {
