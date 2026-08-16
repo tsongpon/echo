@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
 	"strings"
 
+	"cloud.google.com/go/firestore"
 	"github.com/joho/godotenv"
 	"github.com/labstack/echo/v5"
 	"github.com/labstack/echo/v5/middleware"
@@ -20,9 +23,6 @@ import (
 )
 
 func main() {
-	// Load .env if present. Existing real environment variables take
-	// precedence over values in the file, so this is safe to call in any
-	// environment.
 	if err := godotenv.Load(); err != nil {
 		slog.Info("no .env file found; relying on environment variables")
 	}
@@ -34,9 +34,6 @@ func main() {
 	e.Use(middleware.RequestLogger())
 	e.Use(middleware.Recover())
 
-	// JWT signing secret. Prefer the JWT_SECRET env var in production; fall
-	// back to a random secret (suitable only for local dev, since tokens
-	// won't survive a restart).
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
 		rb := make([]byte, 32)
@@ -54,7 +51,13 @@ func main() {
 	}
 
 	// Wire up dependencies: repository -> service -> handler.
-	employeeRepo := repository.NewEmployeeInMemoryRepository()
+	employeeRepo, repoCloser, err := buildEmployeeRepository(context.Background())
+	if err != nil {
+		fatal("failed to create employee repository", "error", err)
+	}
+	if repoCloser != nil {
+		defer repoCloser()
+	}
 	tokenSigner, err := auth.NewTokenSigner(secret, auth.DefaultTTL)
 	if err != nil {
 		fatal("failed to create token signer", "error", err)
@@ -79,9 +82,6 @@ func main() {
 	}
 }
 
-// configureLogger installs a slog text handler writing to os.Stdout as the
-// default logger. The level is taken from the LOG_LEVEL env var (debug, info,
-// warn, error) and defaults to info.
 func configureLogger() {
 	var level slog.Level
 	switch strings.ToLower(os.Getenv("LOG_LEVEL")) {
@@ -97,17 +97,29 @@ func configureLogger() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
 }
 
-// fatal logs an error at the error level and exits with status 1. It is the
-// slog equivalent of log.Fatalf for startup failures that cannot be recovered.
 func fatal(msg string, args ...any) {
 	slog.Error(msg, args...)
 	os.Exit(1)
 }
 
-// buildMailer selects the email backend from the environment. When
-// RESEND_API_KEY is set, verification email is delivered through the Resend
-// API; otherwise a LogMailer is used, which only logs the verification link
-// (suitable for local development).
+func buildEmployeeRepository(ctx context.Context) (service.EmployeeRepository, func(), error) {
+	projectID := os.Getenv("FIRESTORE_PROJECT_ID")
+	if projectID == "" {
+		return nil, nil, errors.New("FIRESTORE_PROJECT_ID must be set")
+	}
+
+	client, err := firestore.NewClientWithDatabase(ctx, projectID, os.Getenv("FIRESTORE_DATABASE_NAME"))
+	if err != nil {
+		return nil, nil, err
+	}
+	slog.Info("using Firestore employee repository", "project", projectID)
+	return repository.NewEmployeeFirestoreRepository(client, nil), func() {
+		if err := client.Close(); err != nil {
+			slog.Error("firestore: client close failed", "project", projectID, "error", err)
+		}
+	}, nil
+}
+
 func buildMailer() service.Mailer {
 	if apiKey := os.Getenv("RESEND_API_KEY"); apiKey != "" {
 		return mailer.NewResendMailer(apiKey, os.Getenv("RESEND_FROM_EMAIL"), os.Getenv("APP_BASE_URL"), nil)

@@ -27,14 +27,17 @@ type fakeRepo struct {
 }
 
 func (f *fakeRepo) Create(_ context.Context, employee *model.Employee) (*model.Employee, error) {
-	f.created = employee
-	employee.ID = "emp-1"
 	if f.byEmail == nil {
 		f.byEmail = make(map[string]*model.Employee)
 	}
 	if f.byID == nil {
 		f.byID = make(map[string]*model.Employee)
 	}
+	if _, exists := f.byEmail[strings.ToLower(employee.Email)]; exists {
+		return nil, apperror.ErrEmailTaken
+	}
+	f.created = employee
+	employee.ID = "emp-1"
 	f.byEmail[strings.ToLower(employee.Email)] = employee
 	f.byID[employee.ID] = employee
 	return employee, nil
@@ -155,6 +158,65 @@ func TestRegister_SendsVerification(t *testing.T) {
 	}
 	if created.IsMailVerified {
 		t.Fatal("newly registered employee should still be unverified; IsMailVerified must be false")
+	}
+}
+
+func TestRegister_DuplicateEmail(t *testing.T) {
+	svc, _ := newTestService()
+
+	first := &model.Employee{
+		Name:           "Alice",
+		OrganizationID: "org-1",
+		Email:          "alice@example.com",
+		Password:       "supersecret",
+	}
+	if _, err := svc.Register(context.Background(), first); err != nil {
+		t.Fatalf("first Register: unexpected error: %v", err)
+	}
+
+	// A second registration with the same email must be rejected. Email
+	// uniqueness is global, so an different organization does not help.
+	second := &model.Employee{
+		Name:           "Alicia",
+		OrganizationID: "org-2",
+		Email:          "alice@example.com",
+		Password:       "anothersecret",
+	}
+	_, err := svc.Register(context.Background(), second)
+	if !errors.Is(err, apperror.ErrEmailTaken) {
+		t.Fatalf("expected apperror.ErrEmailTaken, got %v", err)
+	}
+
+	// The duplicate must not have overwritten or mutated the first employee.
+	got, err := svc.GetByID(context.Background(), first.ID)
+	if err != nil {
+		t.Fatalf("GetByID after duplicate: %v", err)
+	}
+	if got.Name != "Alice" {
+		t.Fatalf("first employee name changed to %q", got.Name)
+	}
+
+	// Case-insensitive: an uppercased variant of the same email is still a
+	// duplicate.
+	third := &model.Employee{
+		Name:           "Aly",
+		OrganizationID: "org-3",
+		Email:          "ALICE@example.com",
+		Password:       "yetanother",
+	}
+	if _, err := svc.Register(context.Background(), third); !errors.Is(err, apperror.ErrEmailTaken) {
+		t.Fatalf("expected apperror.ErrEmailTaken for case variant, got %v", err)
+	}
+
+	// A genuinely new email still succeeds.
+	fresh := &model.Employee{
+		Name:           "Bob",
+		OrganizationID: "org-1",
+		Email:          "bob@example.com",
+		Password:       "supersecret",
+	}
+	if _, err := svc.Register(context.Background(), fresh); err != nil {
+		t.Fatalf("fresh email Register: unexpected error: %v", err)
 	}
 }
 

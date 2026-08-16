@@ -19,15 +19,17 @@ import (
 // interface. It lets the Me handler be unit-tested without the real bcrypt-
 // backed service or the in-memory repository.
 type fakeEmployeeService struct {
-	byID      map[string]*model.Employee
-	getErr    error
-	verifyErr error
-	loginEmp  *model.Employee
-	loginErr  error
+	byID        map[string]*model.Employee
+	getErr      error
+	verifyErr   error
+	loginEmp    *model.Employee
+	loginErr    error
+	registerEmp *model.Employee
+	registerErr error
 }
 
 func (f *fakeEmployeeService) Register(_ context.Context, _ *model.Employee) (*model.Employee, error) {
-	return nil, errors.New("not implemented")
+	return f.registerEmp, f.registerErr
 }
 
 func (f *fakeEmployeeService) Login(_ context.Context, _, _ string) (*model.Employee, error) {
@@ -389,6 +391,107 @@ func TestLogin_Handler(t *testing.T) {
 				}
 				if !strings.Contains(rec.Body.String(), tc.wantBodyIn) {
 					t.Fatalf("expected %q in body, got %s", tc.wantBodyIn, rec.Body.String())
+				}
+				return
+			}
+
+			he, ok := err.(*echo.HTTPError)
+			if !ok {
+				t.Fatalf("expected *echo.HTTPError, got %T: %v", err, err)
+			}
+			if he.Code != tc.wantCode {
+				t.Fatalf("got status %d, want %d", he.Code, tc.wantCode)
+			}
+			if he.Message != tc.wantBodyIn {
+				t.Fatalf("expected message %q, got %v", tc.wantBodyIn, he.Message)
+			}
+		})
+	}
+}
+
+func TestRegister_Handler(t *testing.T) {
+	signer, err := auth.NewTokenSigner("test-secret", 0)
+	if err != nil {
+		t.Fatalf("NewTokenSigner: %v", err)
+	}
+
+	createdEmp := &model.Employee{
+		ID:             "emp-1",
+		Name:           "Alice",
+		OrganizationID: "org-1",
+		Title:          "Engineer",
+		Email:          "alice@example.com",
+	}
+
+	cases := []struct {
+		name        string
+		body        string
+		registerEmp *model.Employee
+		registerErr error
+		wantCode    int
+		wantBodyIn  string
+	}{
+		{
+			name:        "success",
+			body:        `{"name":"Alice","organization_id":"org-1","title":"Engineer","email":"alice@example.com","password":"supersecret"}`,
+			registerEmp: createdEmp,
+			wantCode:    http.StatusCreated,
+			wantBodyIn:  "alice@example.com",
+		},
+		{
+			name:        "duplicate email",
+			body:        `{"name":"Alice","organization_id":"org-1","email":"alice@example.com","password":"supersecret"}`,
+			registerErr: apperror.ErrEmailTaken,
+			wantCode:    http.StatusConflict,
+			wantBodyIn:  "email already taken",
+		},
+		{
+			name:        "validation error",
+			body:        `{"name":"","organization_id":"org-1","email":"a@example.com","password":"supersecret"}`,
+			registerErr: apperror.ErrInvalidEmployee("name is required"),
+			wantCode:    http.StatusBadRequest,
+			wantBodyIn:  "name is required",
+		},
+		{
+			name:        "internal error",
+			body:        `{"name":"Alice","organization_id":"org-1","email":"a@example.com","password":"supersecret"}`,
+			registerErr: errors.New("db down"),
+			wantCode:    http.StatusInternalServerError,
+			wantBodyIn:  "failed to register employee",
+		},
+		{
+			name:       "malformed body",
+			body:       `{not-json`,
+			wantCode:   http.StatusBadRequest,
+			wantBodyIn: "invalid request body",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &fakeEmployeeService{registerEmp: tc.registerEmp, registerErr: tc.registerErr}
+			h := NewEmployeeHandler(svc, signer)
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/register", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+
+			e := echo.New()
+			c := e.NewContext(req, rec)
+
+			err := h.Register(c)
+			if tc.wantCode == http.StatusCreated {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if rec.Code != tc.wantCode {
+					t.Fatalf("got status %d, want %d", rec.Code, tc.wantCode)
+				}
+				if !strings.Contains(rec.Body.String(), tc.wantBodyIn) {
+					t.Fatalf("expected %q in body, got %s", tc.wantBodyIn, rec.Body.String())
+				}
+				if strings.Contains(rec.Body.String(), "password") {
+					t.Fatalf("response must not contain password: %s", rec.Body.String())
 				}
 				return
 			}

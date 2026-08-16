@@ -29,6 +29,11 @@ var ErrEmailNotVerified = errors.New("email not verified")
 // sentinel for all failure modes avoids leaking why a token was rejected.
 var ErrInvalidVerificationToken = errors.New("invalid or expired verification token")
 
+// ErrEmailTaken is returned by Create when an employee with the same (case-
+// normalized) email already exists. Email is a global identity, so uniqueness
+// spans organizations.
+var ErrEmailTaken = errors.New("email already taken")
+
 // ErrInvalidEmployee indicates a validation failure of an employee input. It
 // carries a human-readable message describing the failed validation.
 type ErrInvalidEmployee string

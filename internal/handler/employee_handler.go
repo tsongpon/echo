@@ -50,6 +50,9 @@ func (h *EmployeeHandler) Register(c *echo.Context) error {
 		if errors.As(err, &invalid) {
 			return echo.NewHTTPError(http.StatusBadRequest, invalid.Error())
 		}
+		if errors.Is(err, apperror.ErrEmailTaken) {
+			return echo.NewHTTPError(http.StatusConflict, "email already taken")
+		}
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to register employee")
 	}
 

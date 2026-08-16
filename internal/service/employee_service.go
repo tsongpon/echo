@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/tsongpon/echo/internal/apperror"
@@ -88,6 +90,13 @@ func (s *EmployeeService) Register(ctx context.Context, employee *model.Employee
 	}
 	employee.IsMailVerified = false
 	employee.Password = string(hashed)
+	id, err := uuid.NewV7() // (UUID, error) — time-ordered
+	if err != nil {
+		s.logger.Error("failed to generate UUID", "error", err)
+		return nil, err
+	}
+	employee.ID = id.String()
+	employee.Email = strings.ToLower(employee.Email)
 
 	created, err := s.repo.Create(ctx, employee)
 	if err != nil {
