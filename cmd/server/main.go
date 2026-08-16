@@ -63,7 +63,7 @@ func main() {
 	if err != nil {
 		fatal("failed to create verification token signer", "error", err)
 	}
-	employeeService := service.NewEmployeeService(employeeRepo, mailer.NewLogMailer("", nil), verifySigner, nil)
+	employeeService := service.NewEmployeeService(employeeRepo, buildMailer(), verifySigner, nil)
 	employeeHandler := handler.NewEmployeeHandler(employeeService, tokenSigner)
 
 	e.GET("/ping", func(c *echo.Context) error {
@@ -102,4 +102,16 @@ func configureLogger() {
 func fatal(msg string, args ...any) {
 	slog.Error(msg, args...)
 	os.Exit(1)
+}
+
+// buildMailer selects the email backend from the environment. When
+// RESEND_API_KEY is set, verification email is delivered through the Resend
+// API; otherwise a LogMailer is used, which only logs the verification link
+// (suitable for local development).
+func buildMailer() service.Mailer {
+	if apiKey := os.Getenv("RESEND_API_KEY"); apiKey != "" {
+		return mailer.NewResendMailer(apiKey, os.Getenv("RESEND_FROM_EMAIL"), os.Getenv("APP_BASE_URL"), nil)
+	}
+	slog.Info("RESEND_API_KEY not set; using LogMailer (verification links will be logged only)")
+	return mailer.NewLogMailer(os.Getenv("APP_BASE_URL"), nil)
 }
