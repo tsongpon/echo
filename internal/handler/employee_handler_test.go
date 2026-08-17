@@ -57,11 +57,11 @@ func TestMe_Handler(t *testing.T) {
 	}
 
 	emp := &model.Employee{
-		ID:             "emp-1",
-		Name:           "Alice",
-		OrganizationID: "org-1",
-		Title:          "Engineer",
-		Email:          "alice@example.com",
+		ID:               "emp-1",
+		Name:             "Alice",
+		OrganizationName: "org-1",
+		Title:            "Engineer",
+		Email:            "alice@example.com",
 	}
 	svc := &fakeEmployeeService{byID: map[string]*model.Employee{"emp-1": emp}}
 	h := NewEmployeeHandler(svc, signer)
@@ -317,12 +317,12 @@ func TestLogin_Handler(t *testing.T) {
 	}
 
 	verifiedEmp := &model.Employee{
-		ID:             "emp-1",
-		Name:           "Alice",
-		OrganizationID: "org-1",
-		Title:          "Engineer",
-		Email:          "alice@example.com",
-		IsMailVerified: true,
+		ID:               "emp-1",
+		Name:             "Alice",
+		OrganizationName: "org-1",
+		Title:            "Engineer",
+		Email:            "alice@example.com",
+		IsMailVerified:   true,
 	}
 
 	cases := []struct {
@@ -416,11 +416,11 @@ func TestRegister_Handler(t *testing.T) {
 	}
 
 	createdEmp := &model.Employee{
-		ID:             "emp-1",
-		Name:           "Alice",
-		OrganizationID: "org-1",
-		Title:          "Engineer",
-		Email:          "alice@example.com",
+		ID:               "emp-1",
+		Name:             "Alice",
+		OrganizationName: "org-1",
+		Title:            "Engineer",
+		Email:            "alice@example.com",
 	}
 
 	cases := []struct {
@@ -433,28 +433,28 @@ func TestRegister_Handler(t *testing.T) {
 	}{
 		{
 			name:        "success",
-			body:        `{"name":"Alice","organization_id":"org-1","title":"Engineer","email":"alice@example.com","password":"supersecret"}`,
+			body:        `{"name":"Alice","organization_name":"org-1","title":"Engineer","email":"alice@example.com","password":"supersecret"}`,
 			registerEmp: createdEmp,
 			wantCode:    http.StatusCreated,
 			wantBodyIn:  "alice@example.com",
 		},
 		{
 			name:        "duplicate email",
-			body:        `{"name":"Alice","organization_id":"org-1","email":"alice@example.com","password":"supersecret"}`,
+			body:        `{"name":"Alice","organization_name":"org-1","email":"alice@example.com","password":"supersecret"}`,
 			registerErr: apperror.ErrEmailTaken,
 			wantCode:    http.StatusConflict,
 			wantBodyIn:  "email already taken",
 		},
 		{
 			name:        "validation error",
-			body:        `{"name":"","organization_id":"org-1","email":"a@example.com","password":"supersecret"}`,
+			body:        `{"name":"","organization_name":"org-1","email":"a@example.com","password":"supersecret"}`,
 			registerErr: apperror.ErrInvalidEmployee("name is required"),
 			wantCode:    http.StatusBadRequest,
 			wantBodyIn:  "name is required",
 		},
 		{
 			name:        "internal error",
-			body:        `{"name":"Alice","organization_id":"org-1","email":"a@example.com","password":"supersecret"}`,
+			body:        `{"name":"Alice","organization_name":"org-1","email":"a@example.com","password":"supersecret"}`,
 			registerErr: errors.New("db down"),
 			wantCode:    http.StatusInternalServerError,
 			wantBodyIn:  "failed to register employee",

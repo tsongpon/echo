@@ -33,6 +33,7 @@ func main() {
 
 	e.Use(middleware.RequestLogger())
 	e.Use(middleware.Recover())
+	e.Use(middleware.CORSWithConfig(buildCORSConfig()))
 
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
@@ -126,4 +127,22 @@ func buildMailer() service.Mailer {
 	}
 	slog.Info("RESEND_API_KEY not set; using LogMailer (verification links will be logged only)")
 	return mailer.NewLogMailer(os.Getenv("APP_BASE_URL"), nil)
+}
+
+// buildCORSConfig configures the CORS middleware to allow all origins. The
+// current auth scheme is a bearer token in the Authorization header rather
+// than cookies, so a wildcard origin is safe and AllowCredentials is left
+// false -- browsers reject Access-Control-Allow-Credentials together with a
+// wildcard origin anyway, and the API does not rely on credentialed requests.
+//
+// Allowed headers cover Authorization (bearer token) and Content-Type (JSON
+// request bodies); allowed methods cover the full CRUD set used by the API.
+// Preflight responses are cached for 5 minutes to keep OPTIONS traffic down.
+func buildCORSConfig() middleware.CORSConfig {
+	return middleware.CORSConfig{
+		AllowOrigins: []string{"*"},
+		AllowHeaders: []string{echo.HeaderAuthorization, echo.HeaderContentType, echo.HeaderAccept},
+		AllowMethods: []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete},
+		MaxAge:       300,
+	}
 }

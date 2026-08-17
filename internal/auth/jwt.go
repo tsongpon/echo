@@ -56,10 +56,10 @@ const purposeEmailVerification = "email_verification"
 
 // Claims is the JWT payload for an employee access token.
 type Claims struct {
-	Email          string `json:"email"`
-	Name           string `json:"name"`
-	OrganizationID string `json:"organization_id"`
-	Title          string `json:"title"`
+	Email            string `json:"email"`
+	Name             string `json:"name"`
+	OrganizationName string `json:"organization_name"`
+	Title            string `json:"title"`
 	jwt.RegisteredClaims
 }
 
@@ -75,10 +75,10 @@ func (s *TokenSigner) Sign(employee *model.Employee) (string, error) {
 
 	now := time.Now().UTC()
 	claims := Claims{
-		Email:          employee.Email,
-		Name:           employee.Name,
-		OrganizationID: employee.OrganizationID,
-		Title:          employee.Title,
+		Email:            employee.Email,
+		Name:             employee.Name,
+		OrganizationName: employee.OrganizationName,
+		Title:            employee.Title,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   employee.ID,
 			IssuedAt:  jwt.NewNumericDate(now),

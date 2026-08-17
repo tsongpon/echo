@@ -17,11 +17,11 @@ func TestTokenSigner_SignAndParse(t *testing.T) {
 	}
 
 	emp := &model.Employee{
-		ID:             "emp-1",
-		Name:           "Alice",
-		OrganizationID: "org-1",
-		Title:          "Engineer",
-		Email:          "alice@example.com",
+		ID:               "emp-1",
+		Name:             "Alice",
+		OrganizationName: "org-1",
+		Title:            "Engineer",
+		Email:            "alice@example.com",
 	}
 
 	signed, err := signer.Sign(emp)
@@ -52,8 +52,8 @@ func TestTokenSigner_SignAndParse(t *testing.T) {
 	if claims.Email != "alice@example.com" {
 		t.Fatalf("got email %q", claims.Email)
 	}
-	if claims.OrganizationID != "org-1" {
-		t.Fatalf("got organization_id %q", claims.OrganizationID)
+	if claims.OrganizationName != "org-1" {
+		t.Fatalf("got organization_name %q", claims.OrganizationName)
 	}
 	if claims.ExpiresAt == nil {
 		t.Fatal("expires_at is nil")
@@ -90,11 +90,11 @@ func TestTokenSigner_Verify(t *testing.T) {
 	}
 
 	emp := &model.Employee{
-		ID:             "emp-1",
-		Name:           "Alice",
-		OrganizationID: "org-1",
-		Title:          "Engineer",
-		Email:          "alice@example.com",
+		ID:               "emp-1",
+		Name:             "Alice",
+		OrganizationName: "org-1",
+		Title:            "Engineer",
+		Email:            "alice@example.com",
 	}
 
 	signed, err := signer.Sign(emp)
@@ -120,10 +120,10 @@ func TestTokenSigner_Verify(t *testing.T) {
 		// test lives in package auth, so it can reach the unexported secret.
 		now := time.Now().UTC()
 		claims := Claims{
-			Email:          emp.Email,
-			Name:           emp.Name,
-			OrganizationID: emp.OrganizationID,
-			Title:          emp.Title,
+			Email:            emp.Email,
+			Name:             emp.Name,
+			OrganizationName: emp.OrganizationName,
+			Title:            emp.Title,
 			RegisteredClaims: jwt.RegisteredClaims{
 				Subject:   emp.ID,
 				IssuedAt:  jwt.NewNumericDate(now.Add(-2 * time.Hour)),

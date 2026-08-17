@@ -74,8 +74,8 @@ func (s *EmployeeService) Register(ctx context.Context, employee *model.Employee
 	if strings.TrimSpace(employee.Email) == "" {
 		return nil, apperror.ErrInvalidEmployee("email is required")
 	}
-	if strings.TrimSpace(employee.OrganizationID) == "" {
-		return nil, apperror.ErrInvalidEmployee("organization_id is required")
+	if strings.TrimSpace(employee.OrganizationName) == "" {
+		return nil, apperror.ErrInvalidEmployee("organization_name is required")
 	}
 	if employee.Password == "" {
 		return nil, apperror.ErrInvalidEmployee("password is required")

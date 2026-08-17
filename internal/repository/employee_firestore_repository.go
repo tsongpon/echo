@@ -77,15 +77,15 @@ func (r *EmployeeFirestoreRepository) logError(msg string, err error, args ...an
 // comparison, so an address is canonicalized on write and GetByEmail
 // canonicalizes the search term the same way to match it.
 type employeeDocument struct {
-	Name           string    `firestore:"name"`
-	OrganizationID string    `firestore:"organization_id"`
-	ManagerID      *string   `firestore:"manager_id"`
-	Title          string    `firestore:"title"`
-	Email          string    `firestore:"email"`
-	Password       string    `firestore:"password"`
-	IsMailVerified bool      `firestore:"is_mail_verified"`
-	CreatedAt      time.Time `firestore:"created_at"`
-	UpdatedAt      time.Time `firestore:"updated_at"`
+	Name             string    `firestore:"name"`
+	OrganizationName string    `firestore:"organization_name"`
+	ManagerID        *string   `firestore:"manager_id"`
+	Title            string    `firestore:"title"`
+	Email            string    `firestore:"email"`
+	Password         string    `firestore:"password"`
+	IsMailVerified   bool      `firestore:"is_mail_verified"`
+	CreatedAt        time.Time `firestore:"created_at"`
+	UpdatedAt        time.Time `firestore:"updated_at"`
 }
 
 // Create stores the given employee as a new document keyed by its ID and
@@ -305,15 +305,15 @@ func (r *EmployeeFirestoreRepository) emailClaimDoc(normalizedEmail string) *fir
 // newEmployeeDocument projects a domain employee onto its stored form.
 func newEmployeeDocument(employee *model.Employee) *employeeDocument {
 	return &employeeDocument{
-		Name:           employee.Name,
-		OrganizationID: employee.OrganizationID,
-		ManagerID:      employee.ManagerID,
-		Title:          employee.Title,
-		Email:          employee.Email,
-		Password:       employee.Password,
-		IsMailVerified: employee.IsMailVerified,
-		CreatedAt:      employee.CreatedAt,
-		UpdatedAt:      employee.UpdatedAt,
+		Name:             employee.Name,
+		OrganizationName: employee.OrganizationName,
+		ManagerID:        employee.ManagerID,
+		Title:            employee.Title,
+		Email:            employee.Email,
+		Password:         employee.Password,
+		IsMailVerified:   employee.IsMailVerified,
+		CreatedAt:        employee.CreatedAt,
+		UpdatedAt:        employee.UpdatedAt,
 	}
 }
 
@@ -330,16 +330,16 @@ func (r *EmployeeFirestoreRepository) toEmployee(snapshot *firestore.DocumentSna
 	}
 
 	return &model.Employee{
-		ID:             snapshot.Ref.ID,
-		Name:           doc.Name,
-		OrganizationID: doc.OrganizationID,
-		ManagerID:      doc.ManagerID,
-		Title:          doc.Title,
-		Email:          doc.Email,
-		Password:       doc.Password,
-		IsMailVerified: doc.IsMailVerified,
-		CreatedAt:      doc.CreatedAt,
-		UpdatedAt:      doc.UpdatedAt,
+		ID:               snapshot.Ref.ID,
+		Name:             doc.Name,
+		OrganizationName: doc.OrganizationName,
+		ManagerID:        doc.ManagerID,
+		Title:            doc.Title,
+		Email:            doc.Email,
+		Password:         doc.Password,
+		IsMailVerified:   doc.IsMailVerified,
+		CreatedAt:        doc.CreatedAt,
+		UpdatedAt:        doc.UpdatedAt,
 	}, nil
 }
 

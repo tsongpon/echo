@@ -17,3 +17,6 @@
 .DS_Store
 .idea/
 .vscode/
+
+# Frontend hand-off specs (internal handouts, not part of the app)
+/frontend-handoff/

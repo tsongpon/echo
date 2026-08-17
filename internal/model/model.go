@@ -2,22 +2,17 @@ package model
 
 import "time"
 
-type Organization struct {
-	ID   string
-	Name string
-}
-
 type Employee struct {
-	ID             string
-	Name           string
-	OrganizationID string
-	ManagerID      *string
-	Title          string
-	Email          string
-	Password       string
-	IsMailVerified bool
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID               string
+	Name             string
+	OrganizationName string
+	ManagerID        *string
+	Title            string
+	Email            string
+	Password         string
+	IsMailVerified   bool
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 type FeedbackVisibility string

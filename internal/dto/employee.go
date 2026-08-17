@@ -8,12 +8,12 @@ import (
 
 // RegisterEmployeeRequest is the request body for POST /v1/register.
 type RegisterEmployeeRequest struct {
-	Name           string  `json:"name"`
-	OrganizationID string  `json:"organization_id"`
-	ManagerID      *string `json:"manager_id,omitempty"`
-	Title          string  `json:"title"`
-	Email          string  `json:"email"`
-	Password       string  `json:"password"`
+	Name             string  `json:"name"`
+	OrganizationName string  `json:"organization_name"`
+	ManagerID        *string `json:"manager_id,omitempty"`
+	Title            string  `json:"title"`
+	Email            string  `json:"email"`
+	Password         string  `json:"password"`
 }
 
 // LoginRequest is the request body for POST /v1/login.
@@ -33,27 +33,27 @@ type LoginResponse struct {
 // EmployeeResponse is the representation of an employee returned to clients.
 // It intentionally omits the password.
 type EmployeeResponse struct {
-	ID             string    `json:"id"`
-	Name           string    `json:"name"`
-	OrganizationID string    `json:"organization_id"`
-	ManagerID      *string   `json:"manager_id,omitempty"`
-	Title          string    `json:"title"`
-	Email          string    `json:"email"`
-	IsMailVerified bool      `json:"is_mail_verified"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	ID               string    `json:"id"`
+	Name             string    `json:"name"`
+	OrganizationName string    `json:"organization_name"`
+	ManagerID        *string   `json:"manager_id,omitempty"`
+	Title            string    `json:"title"`
+	Email            string    `json:"email"`
+	IsMailVerified   bool      `json:"is_mail_verified"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 // ToEmployee maps a register request to a domain Employee, without the
 // lifecycle fields (ID/CreatedAt/UpdatedAt) which the repository assigns.
 func (r RegisterEmployeeRequest) ToEmployee() *model.Employee {
 	return &model.Employee{
-		Name:           r.Name,
-		OrganizationID: r.OrganizationID,
-		ManagerID:      r.ManagerID,
-		Title:          r.Title,
-		Email:          r.Email,
-		Password:       r.Password,
+		Name:             r.Name,
+		OrganizationName: r.OrganizationName,
+		ManagerID:        r.ManagerID,
+		Title:            r.Title,
+		Email:            r.Email,
+		Password:         r.Password,
 	}
 }
 
@@ -63,14 +63,14 @@ func ToEmployeeResponse(e *model.Employee) EmployeeResponse {
 		return EmployeeResponse{}
 	}
 	return EmployeeResponse{
-		ID:             e.ID,
-		Name:           e.Name,
-		OrganizationID: e.OrganizationID,
-		ManagerID:      e.ManagerID,
-		Title:          e.Title,
-		Email:          e.Email,
-		IsMailVerified: e.IsMailVerified,
-		CreatedAt:      e.CreatedAt,
-		UpdatedAt:      e.UpdatedAt,
+		ID:               e.ID,
+		Name:             e.Name,
+		OrganizationName: e.OrganizationName,
+		ManagerID:        e.ManagerID,
+		Title:            e.Title,
+		Email:            e.Email,
+		IsMailVerified:   e.IsMailVerified,
+		CreatedAt:        e.CreatedAt,
+		UpdatedAt:        e.UpdatedAt,
 	}
 }

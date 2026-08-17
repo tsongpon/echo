@@ -101,7 +101,7 @@ func TestRegister_HashesPassword(t *testing.T) {
 	plaintext := "supersecret"
 	emp := &model.Employee{
 		Name:           "Alice",
-		OrganizationID: "org-1",
+		OrganizationName: "org-1",
 		Email:          "alice@example.com",
 		Password:       plaintext,
 	}
@@ -140,7 +140,7 @@ func TestRegister_SendsVerification(t *testing.T) {
 
 	created, err := svc.Register(context.Background(), &model.Employee{
 		Name:           "Alice",
-		OrganizationID: "org-1",
+		OrganizationName: "org-1",
 		Email:          "alice@example.com",
 		Password:       "supersecret",
 	})
@@ -166,7 +166,7 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 
 	first := &model.Employee{
 		Name:           "Alice",
-		OrganizationID: "org-1",
+		OrganizationName: "org-1",
 		Email:          "alice@example.com",
 		Password:       "supersecret",
 	}
@@ -178,7 +178,7 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 	// uniqueness is global, so an different organization does not help.
 	second := &model.Employee{
 		Name:           "Alicia",
-		OrganizationID: "org-2",
+		OrganizationName: "org-2",
 		Email:          "alice@example.com",
 		Password:       "anothersecret",
 	}
@@ -200,7 +200,7 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 	// duplicate.
 	third := &model.Employee{
 		Name:           "Aly",
-		OrganizationID: "org-3",
+		OrganizationName: "org-3",
 		Email:          "ALICE@example.com",
 		Password:       "yetanother",
 	}
@@ -211,7 +211,7 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 	// A genuinely new email still succeeds.
 	fresh := &model.Employee{
 		Name:           "Bob",
-		OrganizationID: "org-1",
+		OrganizationName: "org-1",
 		Email:          "bob@example.com",
 		Password:       "supersecret",
 	}
@@ -226,7 +226,7 @@ func TestLogin(t *testing.T) {
 	const plaintext = "supersecret"
 	created, err := svc.Register(context.Background(), &model.Employee{
 		Name:           "Alice",
-		OrganizationID: "org-1",
+		OrganizationName: "org-1",
 		Email:          "alice@example.com",
 		Password:       plaintext,
 	})
@@ -286,7 +286,7 @@ func TestLogin(t *testing.T) {
 		const pw = "supersecret"
 		if _, err := svc.Register(context.Background(), &model.Employee{
 			Name:           "Bob",
-			OrganizationID: "org-1",
+			OrganizationName: "org-1",
 			Email:          "bob@example.com",
 			Password:       pw,
 		}); err != nil {
@@ -305,7 +305,7 @@ func TestGetByID(t *testing.T) {
 
 	created, err := svc.Register(context.Background(), &model.Employee{
 		Name:           "Alice",
-		OrganizationID: "org-1",
+		OrganizationName: "org-1",
 		Email:          "alice@example.com",
 		Password:       "supersecret",
 	})
@@ -355,7 +355,7 @@ func TestRegister_ValidationErrors(t *testing.T) {
 		{
 			name: "missing name",
 			emp: &model.Employee{
-				OrganizationID: "org-1",
+				OrganizationName: "org-1",
 				Email:          "a@example.com",
 				Password:       "pw",
 			},
@@ -365,25 +365,25 @@ func TestRegister_ValidationErrors(t *testing.T) {
 			name: "missing email",
 			emp: &model.Employee{
 				Name:           "Bob",
-				OrganizationID: "org-1",
+				OrganizationName: "org-1",
 				Password:       "pw",
 			},
 			wantMsg: "email is required",
 		},
 		{
-			name: "missing organization_id",
+			name: "missing organization_name",
 			emp: &model.Employee{
 				Name:     "Bob",
 				Email:    "a@example.com",
 				Password: "pw",
 			},
-			wantMsg: "organization_id is required",
+			wantMsg: "organization_name is required",
 		},
 		{
 			name: "missing password",
 			emp: &model.Employee{
 				Name:           "Bob",
-				OrganizationID: "org-1",
+				OrganizationName: "org-1",
 				Email:          "a@example.com",
 			},
 			wantMsg: "password is required",
@@ -392,7 +392,7 @@ func TestRegister_ValidationErrors(t *testing.T) {
 			name: "password too long",
 			emp: &model.Employee{
 				Name:           "Bob",
-				OrganizationID: "org-1",
+				OrganizationName: "org-1",
 				Email:          "a@example.com",
 				Password:       strings.Repeat("x", maxPasswordLen+1),
 			},
@@ -432,7 +432,7 @@ func TestSendVerification(t *testing.T) {
 
 	created, err := svc.Register(context.Background(), &model.Employee{
 		Name:           "Alice",
-		OrganizationID: "org-1",
+		OrganizationName: "org-1",
 		Email:          "alice@example.com",
 		Password:       "supersecret",
 	})
@@ -457,7 +457,7 @@ func TestVerifyEmail(t *testing.T) {
 		svc, _ := newTestService()
 		created, err := svc.Register(context.Background(), &model.Employee{
 			Name:           "Alice",
-			OrganizationID: "org-1",
+			OrganizationName: "org-1",
 			Email:          "alice@example.com",
 			Password:       "supersecret",
 		})
