@@ -18,7 +18,7 @@ import (
 // handler actually needs. The concrete *service.EmployeeService satisfies it
 // implicitly.
 type EmployeeService interface {
-	Register(ctx context.Context, employee *model.Employee) (*model.Employee, error)
+	Register(ctx context.Context, inviteToken string, employee *model.Employee) (*model.Employee, error)
 	Login(ctx context.Context, email, password string) (*model.Employee, error)
 	GetByID(ctx context.Context, id string) (*model.Employee, error)
 	VerifyEmail(ctx context.Context, token string) error
@@ -44,7 +44,7 @@ func (h *EmployeeHandler) Register(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
 
-	created, err := h.employees.Register(c.Request().Context(), req.ToEmployee())
+	created, err := h.employees.Register(c.Request().Context(), req.InviteToken, req.ToEmployee())
 	if err != nil {
 		var invalid apperror.ErrInvalidEmployee
 		if errors.As(err, &invalid) {
@@ -52,6 +52,9 @@ func (h *EmployeeHandler) Register(c *echo.Context) error {
 		}
 		if errors.Is(err, apperror.ErrEmailTaken) {
 			return echo.NewHTTPError(http.StatusConflict, "email already taken")
+		}
+		if errors.Is(err, apperror.ErrInvalidInvitationToken) {
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to register employee")
 	}

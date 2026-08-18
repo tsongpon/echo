@@ -36,20 +36,21 @@ type EmployeeRepository interface {
 // EmployeeService is the application layer that orchestrates employee
 // operations against an EmployeeRepository.
 type EmployeeService struct {
-	repo         EmployeeRepository
-	mailer       Mailer
-	verifySigner *auth.EmailVerificationTokenSigner
-	logger       *slog.Logger
+	repo             EmployeeRepository
+	mailer           Mailer
+	verifySigner     *auth.EmailVerificationTokenSigner
+	invitationSigner *auth.InvitationTokenSigner
+	logger           *slog.Logger
 }
 
 // NewEmployeeService creates an EmployeeService backed by the given
-// repository, mailer, and email-verification token signer. If logger is nil,
-// slog.Default() is used.
-func NewEmployeeService(repo EmployeeRepository, mailer Mailer, verifySigner *auth.EmailVerificationTokenSigner, logger *slog.Logger) *EmployeeService {
+// repository, mailer, email-verification token signer, and invitation token
+// signer. If logger is nil, slog.Default() is used.
+func NewEmployeeService(repo EmployeeRepository, mailer Mailer, verifySigner *auth.EmailVerificationTokenSigner, invitationSigner *auth.InvitationTokenSigner, logger *slog.Logger) *EmployeeService {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &EmployeeService{repo: repo, mailer: mailer, verifySigner: verifySigner, logger: logger}
+	return &EmployeeService{repo: repo, mailer: mailer, verifySigner: verifySigner, invitationSigner: invitationSigner, logger: logger}
 }
 
 // maxPasswordLen caps the incoming plaintext password length before
@@ -64,7 +65,7 @@ const maxPasswordLen = 64
 // email-verification token via the mailer: a delivery failure is logged but
 // does not fail the registration, since the account is already usable and a
 // resend endpoint can re-issue later.
-func (s *EmployeeService) Register(ctx context.Context, employee *model.Employee) (*model.Employee, error) {
+func (s *EmployeeService) Register(ctx context.Context, inviteToken string, employee *model.Employee) (*model.Employee, error) {
 	if employee == nil {
 		return nil, apperror.ErrInvalidEmployee("employee must not be nil")
 	}
@@ -74,14 +75,36 @@ func (s *EmployeeService) Register(ctx context.Context, employee *model.Employee
 	if strings.TrimSpace(employee.Email) == "" {
 		return nil, apperror.ErrInvalidEmployee("email is required")
 	}
-	if strings.TrimSpace(employee.OrganizationName) == "" {
-		return nil, apperror.ErrInvalidEmployee("organization_name is required")
-	}
 	if employee.Password == "" {
 		return nil, apperror.ErrInvalidEmployee("password is required")
 	}
 	if len(employee.Password) > maxPasswordLen {
 		return nil, apperror.ErrInvalidEmployee("password must be at most 64 characters")
+	}
+
+	// Authorization by invitation token. Two paths:
+	//
+	//   - With a token: the caller has been invited. The token is verified and,
+	//     on success, its organization name overrides whatever the client
+	//     supplied so a user can't self-join an arbitrary org, and the role is
+	//     "user". An invalid/expired/wrong-purpose token is rejected as
+	//     ErrInvalidInvitationToken so the handler can map it to a 400.
+	//
+	//   - Without a token: the caller is bootstrapping a new organization, so
+	//     the client-supplied organization_name is required and honored, and
+	//     the role is "org_admin" (the first admin).
+	if strings.TrimSpace(inviteToken) != "" {
+		claims, err := s.invitationSigner.Verify(inviteToken)
+		if err != nil {
+			return nil, apperror.ErrInvalidInvitationToken
+		}
+		employee.OrganizationName = claims.OrganizationName
+		employee.Role = model.RoleUser
+	} else {
+		if strings.TrimSpace(employee.OrganizationName) == "" {
+			return nil, apperror.ErrInvalidEmployee("organization_name is required")
+		}
+		employee.Role = model.RoleOrgAdmin
 	}
 
 	hashed, err := bcrypt.GenerateFromPassword([]byte(employee.Password), bcrypt.DefaultCost)

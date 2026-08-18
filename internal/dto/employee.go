@@ -8,12 +8,14 @@ import (
 
 // RegisterEmployeeRequest is the request body for POST /v1/register.
 type RegisterEmployeeRequest struct {
-	Name             string  `json:"name"`
-	OrganizationName string  `json:"organization_name"`
-	ManagerID        *string `json:"manager_id,omitempty"`
-	Title            string  `json:"title"`
-	Email            string  `json:"email"`
-	Password         string  `json:"password"`
+	Name             string     `json:"name"`
+	OrganizationName string     `json:"organization_name"`
+	Role             model.Role `json:"role"`
+	ManagerID        *string    `json:"manager_id,omitempty"`
+	Title            string     `json:"title"`
+	Email            string     `json:"email"`
+	Password         string     `json:"password"`
+	InviteToken      string     `json:"invite_token"`
 }
 
 // LoginRequest is the request body for POST /v1/login.
@@ -33,15 +35,16 @@ type LoginResponse struct {
 // EmployeeResponse is the representation of an employee returned to clients.
 // It intentionally omits the password.
 type EmployeeResponse struct {
-	ID               string    `json:"id"`
-	Name             string    `json:"name"`
-	OrganizationName string    `json:"organization_name"`
-	ManagerID        *string   `json:"manager_id,omitempty"`
-	Title            string    `json:"title"`
-	Email            string    `json:"email"`
-	IsMailVerified   bool      `json:"is_mail_verified"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID               string     `json:"id"`
+	Name             string     `json:"name"`
+	OrganizationName string     `json:"organization_name"`
+	Role             model.Role `json:"role"`
+	ManagerID        *string    `json:"manager_id,omitempty"`
+	Title            string     `json:"title"`
+	Email            string     `json:"email"`
+	IsMailVerified   bool       `json:"is_mail_verified"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
 // ToEmployee maps a register request to a domain Employee, without the
@@ -50,6 +53,7 @@ func (r RegisterEmployeeRequest) ToEmployee() *model.Employee {
 	return &model.Employee{
 		Name:             r.Name,
 		OrganizationName: r.OrganizationName,
+		Role:             r.Role,
 		ManagerID:        r.ManagerID,
 		Title:            r.Title,
 		Email:            r.Email,
@@ -66,6 +70,7 @@ func ToEmployeeResponse(e *model.Employee) EmployeeResponse {
 		ID:               e.ID,
 		Name:             e.Name,
 		OrganizationName: e.OrganizationName,
+		Role:             e.Role,
 		ManagerID:        e.ManagerID,
 		Title:            e.Title,
 		Email:            e.Email,

@@ -77,15 +77,16 @@ func (r *EmployeeFirestoreRepository) logError(msg string, err error, args ...an
 // comparison, so an address is canonicalized on write and GetByEmail
 // canonicalizes the search term the same way to match it.
 type employeeDocument struct {
-	Name             string    `firestore:"name"`
-	OrganizationName string    `firestore:"organization_name"`
-	ManagerID        *string   `firestore:"manager_id"`
-	Title            string    `firestore:"title"`
-	Email            string    `firestore:"email"`
-	Password         string    `firestore:"password"`
-	IsMailVerified   bool      `firestore:"is_mail_verified"`
-	CreatedAt        time.Time `firestore:"created_at"`
-	UpdatedAt        time.Time `firestore:"updated_at"`
+	Name             string     `firestore:"name"`
+	OrganizationName string     `firestore:"organization_name"`
+	Role             model.Role `firestore:"role"`
+	ManagerID        *string    `firestore:"manager_id"`
+	Title            string     `firestore:"title"`
+	Email            string     `firestore:"email"`
+	Password         string     `firestore:"password"`
+	IsMailVerified   bool       `firestore:"is_mail_verified"`
+	CreatedAt        time.Time  `firestore:"created_at"`
+	UpdatedAt        time.Time  `firestore:"updated_at"`
 }
 
 // Create stores the given employee as a new document keyed by its ID and
@@ -307,6 +308,7 @@ func newEmployeeDocument(employee *model.Employee) *employeeDocument {
 	return &employeeDocument{
 		Name:             employee.Name,
 		OrganizationName: employee.OrganizationName,
+		Role:             employee.Role,
 		ManagerID:        employee.ManagerID,
 		Title:            employee.Title,
 		Email:            employee.Email,
@@ -333,6 +335,7 @@ func (r *EmployeeFirestoreRepository) toEmployee(snapshot *firestore.DocumentSna
 		ID:               snapshot.Ref.ID,
 		Name:             doc.Name,
 		OrganizationName: doc.OrganizationName,
+		Role:             doc.Role,
 		ManagerID:        doc.ManagerID,
 		Title:            doc.Title,
 		Email:            doc.Email,

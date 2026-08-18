@@ -28,7 +28,7 @@ type fakeEmployeeService struct {
 	registerErr error
 }
 
-func (f *fakeEmployeeService) Register(_ context.Context, _ *model.Employee) (*model.Employee, error) {
+func (f *fakeEmployeeService) Register(_ context.Context, _ string, _ *model.Employee) (*model.Employee, error) {
 	return f.registerEmp, f.registerErr
 }
 

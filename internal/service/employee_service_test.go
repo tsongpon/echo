@@ -89,10 +89,14 @@ func newTestService() (*EmployeeService, *noopMailer) {
 	if err != nil {
 		panic(err)
 	}
+	invitationSigner, err := auth.NewInvitationTokenSigner("test-secret", 0)
+	if err != nil {
+		panic(err)
+	}
 	m := &noopMailer{}
 	// Discard log output so service tests stay quiet.
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewEmployeeService(&fakeRepo{}, m, signer, logger), m
+	return NewEmployeeService(&fakeRepo{}, m, signer, invitationSigner, logger), m
 }
 
 func TestRegister_HashesPassword(t *testing.T) {
@@ -106,7 +110,7 @@ func TestRegister_HashesPassword(t *testing.T) {
 		Password:       plaintext,
 	}
 
-	created, err := svc.Register(context.Background(), emp)
+	created, err := svc.Register(context.Background(), "", emp)
 	if err != nil {
 		t.Fatalf("Register returned unexpected error: %v", err)
 	}
@@ -138,7 +142,7 @@ func TestRegister_HashesPassword(t *testing.T) {
 func TestRegister_SendsVerification(t *testing.T) {
 	svc, mailer := newTestService()
 
-	created, err := svc.Register(context.Background(), &model.Employee{
+	created, err := svc.Register(context.Background(), "", &model.Employee{
 		Name:           "Alice",
 		OrganizationName: "org-1",
 		Email:          "alice@example.com",
@@ -170,7 +174,7 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 		Email:          "alice@example.com",
 		Password:       "supersecret",
 	}
-	if _, err := svc.Register(context.Background(), first); err != nil {
+	if _, err := svc.Register(context.Background(), "", first); err != nil {
 		t.Fatalf("first Register: unexpected error: %v", err)
 	}
 
@@ -182,7 +186,7 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 		Email:          "alice@example.com",
 		Password:       "anothersecret",
 	}
-	_, err := svc.Register(context.Background(), second)
+	_, err := svc.Register(context.Background(), "", second)
 	if !errors.Is(err, apperror.ErrEmailTaken) {
 		t.Fatalf("expected apperror.ErrEmailTaken, got %v", err)
 	}
@@ -204,7 +208,7 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 		Email:          "ALICE@example.com",
 		Password:       "yetanother",
 	}
-	if _, err := svc.Register(context.Background(), third); !errors.Is(err, apperror.ErrEmailTaken) {
+	if _, err := svc.Register(context.Background(), "", third); !errors.Is(err, apperror.ErrEmailTaken) {
 		t.Fatalf("expected apperror.ErrEmailTaken for case variant, got %v", err)
 	}
 
@@ -215,16 +219,119 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 		Email:          "bob@example.com",
 		Password:       "supersecret",
 	}
-	if _, err := svc.Register(context.Background(), fresh); err != nil {
+	if _, err := svc.Register(context.Background(), "", fresh); err != nil {
 		t.Fatalf("fresh email Register: unexpected error: %v", err)
 	}
+}
+
+func TestRegister_WithInvitationToken(t *testing.T) {
+	// Issue a real invitation token for "Acme" via the service's signer.
+	invitationSvc := NewInvitationService(testInvitationSigner(t), nil)
+	token, err := invitationSvc.CreateInvitationToken("inviter-1", "Acme", nil)
+	if err != nil {
+		t.Fatalf("CreateInvitationToken: %v", err)
+	}
+
+	t.Run("token overrides organization and sets role user", func(t *testing.T) {
+		svc, _ := newTestService()
+		// The client supplies a *different* org name; the token must win.
+		emp := &model.Employee{
+			Name:             "Bob",
+			OrganizationName: "should-be-ignored",
+			Email:            "bob@example.com",
+			Password:         "supersecret",
+		}
+		created, err := svc.Register(context.Background(), token, emp)
+		if err != nil {
+			t.Fatalf("Register: unexpected error: %v", err)
+		}
+		if created.OrganizationName != "Acme" {
+			t.Fatalf("got organization_name %q, want Acme (from token)", created.OrganizationName)
+		}
+		if created.Role != model.RoleUser {
+			t.Fatalf("got role %q, want user", created.Role)
+		}
+	})
+
+	t.Run("no token sets role org_admin and honors client org", func(t *testing.T) {
+		svc, _ := newTestService()
+		emp := &model.Employee{
+			Name:             "Carol",
+			OrganizationName: "CarolCo",
+			Email:            "carol@example.com",
+			Password:         "supersecret",
+		}
+		created, err := svc.Register(context.Background(), "", emp)
+		if err != nil {
+			t.Fatalf("Register: unexpected error: %v", err)
+		}
+		if created.OrganizationName != "CarolCo" {
+			t.Fatalf("got organization_name %q, want CarolCo", created.OrganizationName)
+		}
+		if created.Role != model.RoleOrgAdmin {
+			t.Fatalf("got role %q, want org_admin", created.Role)
+		}
+	})
+
+	t.Run("invalid token is rejected", func(t *testing.T) {
+		svc, _ := newTestService()
+		emp := &model.Employee{
+			Name:             "Dan",
+			OrganizationName: "DanCo",
+			Email:            "dan@example.com",
+			Password:         "supersecret",
+		}
+		_, err := svc.Register(context.Background(), "not-a-jwt", emp)
+		if !errors.Is(err, apperror.ErrInvalidInvitationToken) {
+			t.Fatalf("expected ErrInvalidInvitationToken, got %v", err)
+		}
+	})
+
+	t.Run("missing organization_name without token is required", func(t *testing.T) {
+		svc, _ := newTestService()
+		emp := &model.Employee{
+			Name:     "Eve",
+			Email:    "eve@example.com",
+			Password: "supersecret",
+		}
+		_, err := svc.Register(context.Background(), "", emp)
+		if err == nil || err.Error() != "organization_name is required" {
+			t.Fatalf("expected organization_name is required, got %v", err)
+		}
+	})
+
+	t.Run("with token, client organization_name is not required", func(t *testing.T) {
+		svc, _ := newTestService()
+		emp := &model.Employee{
+			Name:     "Frank",
+			Email:    "frank@example.com",
+			Password: "supersecret",
+		}
+		created, err := svc.Register(context.Background(), token, emp)
+		if err != nil {
+			t.Fatalf("Register: unexpected error: %v", err)
+		}
+		if created.OrganizationName != "Acme" {
+			t.Fatalf("got organization_name %q, want Acme", created.OrganizationName)
+		}
+	})
+}
+
+// testInvitationSigner builds an InvitationTokenSigner for service tests.
+func testInvitationSigner(t *testing.T) *auth.InvitationTokenSigner {
+	t.Helper()
+	s, err := auth.NewInvitationTokenSigner("test-secret", 0)
+	if err != nil {
+		t.Fatalf("NewInvitationTokenSigner: %v", err)
+	}
+	return s
 }
 
 func TestLogin(t *testing.T) {
 	svc, _ := newTestService()
 
 	const plaintext = "supersecret"
-	created, err := svc.Register(context.Background(), &model.Employee{
+	created, err := svc.Register(context.Background(), "", &model.Employee{
 		Name:           "Alice",
 		OrganizationName: "org-1",
 		Email:          "alice@example.com",
@@ -284,7 +391,7 @@ func TestLogin(t *testing.T) {
 	t.Run("unverified email is rejected", func(t *testing.T) {
 		svc, _ := newTestService()
 		const pw = "supersecret"
-		if _, err := svc.Register(context.Background(), &model.Employee{
+		if _, err := svc.Register(context.Background(), "", &model.Employee{
 			Name:           "Bob",
 			OrganizationName: "org-1",
 			Email:          "bob@example.com",
@@ -303,7 +410,7 @@ func TestLogin(t *testing.T) {
 func TestGetByID(t *testing.T) {
 	svc, _ := newTestService()
 
-	created, err := svc.Register(context.Background(), &model.Employee{
+	created, err := svc.Register(context.Background(), "", &model.Employee{
 		Name:           "Alice",
 		OrganizationName: "org-1",
 		Email:          "alice@example.com",
@@ -403,7 +510,7 @@ func TestRegister_ValidationErrors(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			svc, _ := newTestService()
-			_, err := svc.Register(context.Background(), tc.emp)
+			_, err := svc.Register(context.Background(), "", tc.emp)
 			if err == nil {
 				t.Fatalf("expected validation error, got nil")
 			}
@@ -430,7 +537,7 @@ func testSigner(t *testing.T, ttl time.Duration) *auth.EmailVerificationTokenSig
 func TestSendVerification(t *testing.T) {
 	svc, mailer := newTestService()
 
-	created, err := svc.Register(context.Background(), &model.Employee{
+	created, err := svc.Register(context.Background(), "", &model.Employee{
 		Name:           "Alice",
 		OrganizationName: "org-1",
 		Email:          "alice@example.com",
@@ -455,7 +562,7 @@ func TestVerifyEmail(t *testing.T) {
 	// Register once and reuse the created employee + its signer-issued token.
 	setup := func(t *testing.T) (*EmployeeService, *model.Employee, string) {
 		svc, _ := newTestService()
-		created, err := svc.Register(context.Background(), &model.Employee{
+		created, err := svc.Register(context.Background(), "", &model.Employee{
 			Name:           "Alice",
 			OrganizationName: "org-1",
 			Email:          "alice@example.com",

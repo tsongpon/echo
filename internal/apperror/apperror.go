@@ -29,6 +29,11 @@ var ErrEmailNotVerified = errors.New("email not verified")
 // sentinel for all failure modes avoids leaking why a token was rejected.
 var ErrInvalidVerificationToken = errors.New("invalid or expired verification token")
 
+// ErrInvalidInvitationToken is returned when an invitation token supplied at
+// registration is malformed, expired, wrong-key, or wrong-purpose. As with
+// ErrInvalidVerificationToken, a single sentinel avoids leaking the reason.
+var ErrInvalidInvitationToken = errors.New("invalid or expired invitation token")
+
 // ErrEmailTaken is returned by Create when an employee with the same (case-
 // normalized) email already exists. Email is a global identity, so uniqueness
 // spans organizations.

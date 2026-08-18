@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/tsongpon/echo/internal/model"
 )
 
@@ -22,6 +23,12 @@ var ErrInvalidToken = errors.New("invalid token")
 // for any malformed, expired, or wrong-key verification token. As with
 // ErrInvalidToken, a single sentinel avoids leaking the failure reason.
 var ErrInvalidVerificationToken = errors.New("invalid verification token")
+
+// ErrInvalidInvitationToken is returned by InvitationTokenSigner.Verify for any
+// malformed, expired, wrong-key, or wrong-purpose invitation token. As with the
+// other token sentinels, a single value avoids leaking why a token was
+// rejected.
+var ErrInvalidInvitationToken = errors.New("invalid invitation token")
 
 // TokenSigner issues signed JWTs (HS256) for authenticated employees. The
 // secret is held in memory and never serialized.
@@ -54,12 +61,18 @@ const DefaultVerificationTTL = 24 * time.Hour
 // access token) is never accepted as a verification token.
 const purposeEmailVerification = "email_verification"
 
+// purposeInvitation marks a JWT as an organization-invitation token. The claim
+// is checked on verify so that a token of any other type (including an access
+// or email-verification token) is never accepted as an invitation.
+const purposeInvitation = "invitation"
+
 // Claims is the JWT payload for an employee access token.
 type Claims struct {
-	Email            string `json:"email"`
-	Name             string `json:"name"`
-	OrganizationName string `json:"organization_name"`
-	Title            string `json:"title"`
+	Email            string     `json:"email"`
+	Name             string     `json:"name"`
+	OrganizationName string     `json:"organization_name"`
+	Role             model.Role `json:"role"`
+	Title            string     `json:"title"`
 	jwt.RegisteredClaims
 }
 
@@ -78,6 +91,7 @@ func (s *TokenSigner) Sign(employee *model.Employee) (string, error) {
 		Email:            employee.Email,
 		Name:             employee.Name,
 		OrganizationName: employee.OrganizationName,
+		Role:             employee.Role,
 		Title:            employee.Title,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   employee.ID,
@@ -186,6 +200,108 @@ func (s *EmailVerificationTokenSigner) Verify(token string) (*VerificationClaims
 	}
 	if claims.Purpose != purposeEmailVerification {
 		return nil, ErrInvalidVerificationToken
+	}
+	return claims, nil
+}
+
+// DefaultInvitationTTL is the invitation-token lifetime used when none is
+// specified.
+const DefaultInvitationTTL = 24 * 7 * time.Hour
+
+// InvitationTokenSigner issues signed JWTs used to invite a user to join an
+// organization. It is deliberately separate from TokenSigner and
+// EmailVerificationTokenSigner: it signs with a derived key (the base secret
+// suffixed with "::invitation") so an invitation token can never be valid as an
+// access or email-verification token and vice-versa, even when all signers
+// share the same base secret.
+type InvitationTokenSigner struct {
+	secret []byte
+	ttl    time.Duration
+}
+
+// NewInvitationTokenSigner creates an InvitationTokenSigner. ttl is the
+// invitation-token lifetime; if zero, DefaultInvitationTTL is used.
+func NewInvitationTokenSigner(secret string, ttl time.Duration) (*InvitationTokenSigner, error) {
+	if secret == "" {
+		return nil, ErrInvalidSecret
+	}
+	if ttl <= 0 {
+		ttl = DefaultInvitationTTL
+	}
+	return &InvitationTokenSigner{secret: []byte(secret + "::invitation"), ttl: ttl}, nil
+}
+
+// InvitationClaims is the JWT payload for an invitation token. The subject is
+// the creator's employee ID; the organization name is carried as a claim so the
+// bearer can present the token at registration to prove they were invited to
+// that organization.
+type InvitationClaims struct {
+	OrganizationName string `json:"organization_name"`
+	Purpose          string `json:"purpose"`
+	jwt.RegisteredClaims
+}
+
+// Sign issues a signed invitation JWT for the given organization, attributed to
+// creatorID. If expiresAt is nil the token expires after the signer's TTL;
+// otherwise the caller-supplied time is used (this lets an admin issue a
+// shorter- or longer-lived invitation than the default). The token's JWT ID
+// (jti) is a fresh UUIDv7, which becomes the model.Invitation.ID returned by
+// ExtractInvitationToken.
+func (s *InvitationTokenSigner) Sign(creatorID, organizationName string, expiresAt *time.Time) (string, error) {
+	if creatorID == "" {
+		return "", errors.New("creator id must not be empty")
+	}
+	if organizationName == "" {
+		return "", errors.New("organization name must not be empty")
+	}
+
+	now := time.Now().UTC()
+	exp := now.Add(s.ttl)
+	if expiresAt != nil {
+		exp = expiresAt.UTC()
+	}
+
+	jti, err := uuid.NewV7()
+	if err != nil {
+		return "", fmt.Errorf("generate invitation id: %w", err)
+	}
+
+	claims := InvitationClaims{
+		OrganizationName: organizationName,
+		Purpose:          purposeInvitation,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        jti.String(),
+			Subject:   creatorID,
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(exp),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString(s.secret)
+	if err != nil {
+		return "", fmt.Errorf("sign invitation token: %w", err)
+	}
+	return signed, nil
+}
+
+// Verify validates a signed invitation JWT and returns its claims. Any failure
+// (malformed, expired, wrong-key, or wrong-purpose token) returns
+// ErrInvalidInvitationToken so callers can uniformly map it to a 400.
+func (s *InvitationTokenSigner) Verify(token string) (*InvitationClaims, error) {
+	claims := &InvitationClaims{}
+	parsed, err := jwt.ParseWithClaims(token, claims, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, ErrInvalidInvitationToken
+		}
+		return s.secret, nil
+	})
+	if err != nil || !parsed.Valid {
+		return nil, ErrInvalidInvitationToken
+	}
+	if claims.Purpose != purposeInvitation {
+		return nil, ErrInvalidInvitationToken
 	}
 	return claims, nil
 }

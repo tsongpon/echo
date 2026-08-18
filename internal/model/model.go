@@ -5,6 +5,7 @@ import "time"
 type Employee struct {
 	ID               string
 	Name             string
+	Role             Role
 	OrganizationName string
 	ManagerID        *string
 	Title            string
@@ -14,6 +15,18 @@ type Employee struct {
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 }
+
+// Role is the authorization role of an employee within their organization.
+type Role string
+
+const (
+	// RoleOrgAdmin is the role for an employee who can manage their
+	// organization (e.g. invite new members). The first employee to register
+	// without an invitation token is made an org admin.
+	RoleOrgAdmin Role = "org_admin"
+	// RoleUser is the default role for an employee who joins via an invitation.
+	RoleUser Role = "user"
+)
 
 type FeedbackVisibility string
 
@@ -48,4 +61,12 @@ type FeedbackPeriod struct {
 	EndDate        time.Time
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
+}
+
+type Invitation struct {
+	ID               string
+	CreatedBy        string
+	CreatedAt        time.Time
+	OrganizationName string
+	ExpiresAt        time.Time
 }

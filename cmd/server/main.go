@@ -67,8 +67,14 @@ func main() {
 	if err != nil {
 		fatal("failed to create verification token signer", "error", err)
 	}
-	employeeService := service.NewEmployeeService(employeeRepo, buildMailer(), verifySigner, nil)
+	invitationSigner, err := auth.NewInvitationTokenSigner(secret, auth.DefaultInvitationTTL)
+	if err != nil {
+		fatal("failed to create invitation token signer", "error", err)
+	}
+	employeeService := service.NewEmployeeService(employeeRepo, buildMailer(), verifySigner, invitationSigner, nil)
 	employeeHandler := handler.NewEmployeeHandler(employeeService, tokenSigner)
+	invitationService := service.NewInvitationService(invitationSigner, nil)
+	invitationHandler := handler.NewInvitationHandler(invitationService)
 
 	e.GET("/ping", func(c *echo.Context) error {
 		return c.String(http.StatusOK, "pong")
@@ -77,6 +83,7 @@ func main() {
 	e.POST("/v1/login", employeeHandler.Login)
 	e.GET("/v1/verify-email", employeeHandler.VerifyEmail)
 	e.GET("/v1/me", employeeHandler.Me, handler.Auth(tokenSigner))
+	e.POST("/v1/invitation", invitationHandler.CreateInvitation, handler.Auth(tokenSigner))
 
 	if err := e.Start(":" + port); err != nil {
 		slog.Error("failed to start server", "error", err)
