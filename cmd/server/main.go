@@ -51,14 +51,17 @@ func main() {
 		port = "1323"
 	}
 
-	// Wire up dependencies: repository -> service -> handler.
-	employeeRepo, repoCloser, err := buildEmployeeRepository(context.Background())
+	// Wire up dependencies: repository -> service -> handler. The Firestore
+	// client is shared across repositories (it is per-project/database, not
+	// per-collection), so it is built once and closed via a single closer.
+	firestoreClient, repoCloser, err := buildFirestoreClient(context.Background())
 	if err != nil {
-		fatal("failed to create employee repository", "error", err)
+		fatal("failed to create firestore client", "error", err)
 	}
 	if repoCloser != nil {
 		defer repoCloser()
 	}
+	employeeRepo := repository.NewEmployeeFirestoreRepository(firestoreClient, nil)
 	tokenSigner, err := auth.NewTokenSigner(secret, auth.DefaultTTL)
 	if err != nil {
 		fatal("failed to create token signer", "error", err)
@@ -75,6 +78,9 @@ func main() {
 	employeeHandler := handler.NewEmployeeHandler(employeeService, tokenSigner)
 	invitationService := service.NewInvitationService(invitationSigner, nil)
 	invitationHandler := handler.NewInvitationHandler(invitationService)
+	feedbackPeriodRepo := repository.NewFeedbackPeriodFirestoreRepository(firestoreClient, nil)
+	feedbackPeriodService := service.NewFeedbackPeriodService(feedbackPeriodRepo, nil)
+	feedbackPeriodHandler := handler.NewFeedbackPeriodHandler(feedbackPeriodService)
 
 	e.GET("/ping", func(c *echo.Context) error {
 		return c.String(http.StatusOK, "pong")
@@ -84,6 +90,7 @@ func main() {
 	e.GET("/v1/verify-email", employeeHandler.VerifyEmail)
 	e.GET("/v1/me", employeeHandler.Me, handler.Auth(tokenSigner))
 	e.POST("/v1/invitation", invitationHandler.CreateInvitation, handler.Auth(tokenSigner))
+	e.POST("/v1/feedback-period", feedbackPeriodHandler.CreateFeedbackPeriod, handler.Auth(tokenSigner))
 
 	if err := e.Start(":" + port); err != nil {
 		slog.Error("failed to start server", "error", err)
@@ -110,7 +117,7 @@ func fatal(msg string, args ...any) {
 	os.Exit(1)
 }
 
-func buildEmployeeRepository(ctx context.Context) (service.EmployeeRepository, func(), error) {
+func buildFirestoreClient(ctx context.Context) (*firestore.Client, func(), error) {
 	projectID := os.Getenv("FIRESTORE_PROJECT_ID")
 	if projectID == "" {
 		return nil, nil, errors.New("FIRESTORE_PROJECT_ID must be set")
@@ -120,8 +127,8 @@ func buildEmployeeRepository(ctx context.Context) (service.EmployeeRepository, f
 	if err != nil {
 		return nil, nil, err
 	}
-	slog.Info("using Firestore employee repository", "project", projectID)
-	return repository.NewEmployeeFirestoreRepository(client, nil), func() {
+	slog.Info("using Firestore", "project", projectID)
+	return client, func() {
 		if err := client.Close(); err != nil {
 			slog.Error("firestore: client close failed", "project", projectID, "error", err)
 		}

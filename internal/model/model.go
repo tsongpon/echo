@@ -46,6 +46,7 @@ type Feedback struct {
 	TechnicalScore     int
 	CollaborationScore int
 	DeliveryScore      int
+	TrustScore         int
 	StrengthsComment   string
 	WeaknessesComment  string
 	Visibility         FeedbackVisibility
@@ -54,13 +55,13 @@ type Feedback struct {
 }
 
 type FeedbackPeriod struct {
-	ID             string
-	Name           string
-	OrganizationID string
-	StartDate      time.Time
-	EndDate        time.Time
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID               string
+	Name             string
+	OrganizationName string
+	StartDate        time.Time
+	EndDate          time.Time
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 type Invitation struct {

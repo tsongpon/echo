@@ -11,6 +11,7 @@ are JSON; responses are JSON. The dev server listens on `http://localhost:1323`.
 | POST   | `/v1/login`         | —              | Authenticate and obtain a JWT.                                |
 | GET    | `/v1/me`            | Bearer token   | Get the authenticated employee's profile.                     |
 | POST   | `/v1/invitation`    | Bearer token¹  | Issue an invitation token (org admins only).                  |
+| POST   | `/v1/feedback-period` | Bearer token¹ | Open a feedback period for the caller's organization (org admins only). |
 
 ¹ The caller's JWT `role` claim must be `org_admin`; any other role gets `403`.
 
@@ -196,3 +197,52 @@ to create the invitee's account with `role: "user"`.
 | 401    | `"missing or invalid token"`                    | No/invalid `Authorization` header or bad token.               |
 | 403    | `"only org admins can create invitations"`      | Caller's `role` is not `org_admin`.                           |
 | 500    | `"failed to create invitation"`                 | Unexpected server error.                                      |
+
+---
+
+## Create Feedback Period
+
+`POST /v1/feedback-period` — opens a feedback period for the authenticated
+employee's organization. Requires a valid `Bearer` JWT and the caller must have
+`role: "org_admin"`; any other role returns `403`. The `organization_name` is
+taken from the caller's JWT (not the body), so a client cannot open a period for
+an org they do not belong to.
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X POST http://localhost:1323/v1/feedback-period \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "H2 2026",
+    "start_date": "2026-07-01T00:00:00Z",
+    "end_date": "2026-12-31T23:59:59Z"
+  }'
+```
+
+| Field         | Required | Notes                                                                                  |
+|---------------|----------|----------------------------------------------------------------------------------------|
+| `name`        | yes      | Trimmed; must not be empty.                                                            |
+| `start_date`  | yes      | ISO 8601 timestamp; must not be the zero time.                                          |
+| `end_date`    | yes      | ISO 8601 timestamp; must not be the zero time and must be after `start_date`.           |
+
+Expected response: `HTTP 201`:
+
+```json
+{
+  "id": "0190abcd-...",
+  "name": "H2 2026",
+  "organization_name": "Acme",
+  "start_date": "2026-07-01T00:00:00Z",
+  "end_date": "2026-12-31T23:59:59Z",
+  "created_at": "2026-08-18T10:00:00Z",
+  "updated_at": "2026-08-18T10:00:00Z"
+}
+```
+
+| Status | `message`                                       | When                                                          |
+|--------|-------------------------------------------------|---------------------------------------------------------------|
+| 400    | `"invalid request body"`                        | Malformed/non-JSON body.                                      |
+| 400    | `"<validation message>"`                        | Missing `name`, missing/invalid `start_date` or `end_date`, or `end_date` not after `start_date`. |
+| 401    | `"missing or invalid token"`                    | No/invalid `Authorization` header or bad token.               |
+| 403    | `"only org admins can create feedback periods"` | Caller's `role` is not `org_admin`.                           |
+| 500    | `"failed to create feedback period"`            | Unexpected server error.                                      |

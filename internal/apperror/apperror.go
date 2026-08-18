@@ -50,3 +50,15 @@ func IsInvalidEmployee(err error) bool {
 	var target ErrInvalidEmployee
 	return errors.As(err, &target)
 }
+
+// ErrInvalidFeedbackPeriod indicates a validation failure of a feedback-period
+// input. It carries a human-readable message describing the failed validation.
+type ErrInvalidFeedbackPeriod string
+
+func (e ErrInvalidFeedbackPeriod) Error() string { return string(e) }
+
+// IsInvalidFeedbackPeriod reports whether err is an ErrInvalidFeedbackPeriod.
+func IsInvalidFeedbackPeriod(err error) bool {
+	var target ErrInvalidFeedbackPeriod
+	return errors.As(err, &target)
+}
