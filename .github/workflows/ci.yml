@@ -28,3 +28,29 @@ jobs:
 
       - name: Go test
         run: go test ./...
+
+  lint-openapi:
+    name: lint openapi
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Spectral validates the OpenAPI document is well-formed and follows
+      # the OAS 3.1 ruleset. Caches the npm install across runs.
+      - name: Cache Spectral install
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: spectral-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
+
+      - name: Install Spectral
+        run: npm install -g @stoplight/spectral-cli
+
+      - name: Lint OpenAPI spec
+        run: spectral lint -r spectral:oas cmd/server/openapi.yaml

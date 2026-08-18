@@ -1,0 +1,969 @@
+openapi: 3.1.0
+
+info:
+  title: Echo API
+  version: 1.0.0
+  description: |
+    The Echo feedback platform API.
+
+    All request bodies are JSON; all responses are JSON. Authentication uses a
+    Bearer JWT issued by `POST /v1/login` and carried in the `Authorization`
+    header as `Bearer <access_token>`. Routes marked with a lock icon require
+    this token; public routes do not.
+
+    The dev server listens on `http://localhost:1323`.
+
+servers:
+  - url: http://localhost:1323
+    description: Local development server
+
+tags:
+  - name: System
+    description: Liveness and API documentation endpoints.
+  - name: Auth
+    description: Registration, login, and email verification.
+  - name: Employees
+    description: Employee profile and organization directory.
+  - name: Invitations
+    description: Organization invitation tokens (org admins only).
+  - name: Feedback Periods
+    description: Windows during which feedback can be collected.
+  - name: Feedback
+    description: Peer feedback entries filed against colleagues.
+
+# ----------------------------------------------------------------------------
+# Paths
+# ----------------------------------------------------------------------------
+paths:
+  /ping:
+    get:
+      tags: [System]
+      summary: Liveness check
+      description: Returns `pong` when the server is up. No authentication.
+      operationId: ping
+      security: []
+      responses:
+        "200":
+          description: Server is up.
+          content:
+            text/plain:
+              schema:
+                type: string
+                const: pong
+              examples:
+                ok:
+                  value: pong
+
+  /v1/openapi.yaml:
+    get:
+      tags: [System]
+      summary: OpenAPI specification
+      description: Returns this OpenAPI 3.1 document as YAML. No authentication.
+      operationId: getOpenApiSpec
+      security: []
+      responses:
+        "200":
+          description: The OpenAPI document.
+          content:
+            text/yaml:
+              schema:
+                type: string
+
+  /v1/docs:
+    get:
+      tags: [System]
+      summary: Swagger UI
+      description: |
+        Interactive API documentation (Swagger UI) loaded from `/v1/openapi.yaml`.
+        No authentication. The page is served as HTML and pulls
+        `swagger-ui-bundle.js` from a public CDN.
+      operationId: getDocs
+      security: []
+      responses:
+        "200":
+          description: The Swagger UI HTML page.
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /v1/register:
+    post:
+      tags: [Auth]
+      summary: Register a new employee
+      description: |
+        Creates a new employee and returns the created record. The `password`
+        is hashed server-side with bcrypt and never returned. A fresh account
+        has `is_mail_verified: false` and `role: "org_admin"` when registered
+        without an invitation. On success the server sends a verification email
+        (logged to stdout when no mailer is configured).
+
+        Authorization by invitation token:
+          * With a non-empty `invite_token`: the token is verified and, on
+            success, its organization name overrides whatever the client
+            supplied, and the role is `"user"`. An invalid/expired token is
+            rejected with `400 "invalid or expired invitation token"`.
+          * Without a token: the client-supplied `organization_name` is
+            required and honored, and the role is `"org_admin"` (the first
+            admin).
+      operationId: registerEmployee
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterEmployeeRequest"
+            examples:
+              firstAdmin:
+                summary: First admin (no invitation)
+                value:
+                  name: Alice
+                  organization_name: Acme
+                  manager_id: null
+                  title: Senior Engineer
+                  email: alice@example.com
+                  password: supersecret
+                  invite_token: ""
+      responses:
+        "201":
+          description: The created employee. The `password` field is omitted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmployeeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "409":
+          description: An employee with that email already exists.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                emailTaken:
+                  value: { message: "email already taken" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/login:
+    post:
+      tags: [Auth]
+      summary: Log in
+      description: |
+        Authenticates an employee by email and password and returns a signed
+        JWT on success. Invalid email or wrong password both return
+        `401 "invalid email or password"` to avoid leaking which was wrong.
+        If the credentials are valid but the email is not verified, returns
+        `403 "email not verified"`.
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Authentication succeeded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "401":
+          description: Invalid email or password.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                invalid:
+                  value: { message: "invalid email or password" }
+        "403":
+          description: Email not verified.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                unverified:
+                  value: { message: "email not verified" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/verify-email:
+    get:
+      tags: [Auth]
+      summary: Verify an email address
+      description: |
+        Validates the email-verification token supplied in the `token` query
+        parameter and, on success, marks the matching employee's email as
+        verified. Public and idempotent: verifying an already-verified email
+        succeeds again with the same `200` response.
+      operationId: verifyEmail
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/VerificationToken"
+      responses:
+        "200":
+          description: Email verified.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                required: [message]
+              examples:
+                ok:
+                  value: { message: "email verified" }
+        "400":
+          description: Missing, malformed, expired, or wrong-purpose token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                invalid:
+                  value: { message: "invalid or expired verification token" }
+
+  /v1/me:
+    get:
+      tags: [Employees]
+      summary: Get the current employee's profile
+      description: |
+        Returns the profile of the authenticated employee. The employee is
+        looked up by the token's subject (the employee ID).
+      operationId: getMe
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: The authenticated employee. The `password` field is omitted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmployeeResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: The token's subject no longer matches a stored employee.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                notFound:
+                  value: { message: "employee not found" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/employees:
+    get:
+      tags: [Employees]
+      summary: List employees in the caller's organization
+      description: |
+        Returns one page of employees in the authenticated caller's
+        organization, ordered by name ascending. An employee can only see
+        their own organization's members. The response omits the `password`
+        field. The caller is included in the list; the frontend should filter
+        the caller out when populating a reviewee picker (the backend enforces
+        no self-review at `POST /v1/feedbacks`).
+
+        Pagination is cursor-based: pass the `next_cursor` value from one
+        response as the `cursor` query parameter on the next request. When
+        `next_cursor` is `null` there are no more pages. An unknown cursor
+        (one that does not refer to an existing employee) returns `400`.
+      operationId: listEmployees
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ListLimit"
+        - $ref: "#/components/parameters/ListCursor"
+      responses:
+        "200":
+          description: One page of employees plus the next-page cursor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmployeeListResponse"
+        "400":
+          description: Unknown cursor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                unknownCursor:
+                  value: { message: "unknown cursor" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/invitation:
+    post:
+      tags: [Invitations]
+      summary: Create an invitation token
+      description: |
+        Issues a signed invitation token that lets the bearer register as a
+        member of the named organization. The caller must have
+        `role: "org_admin"`; any other role returns `403`. The returned
+        `token` is then passed as `invite_token` in `POST /v1/register` to
+        create the invitee's account with `role: "user"`.
+      operationId: createInvitation
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateInvitationRequest"
+            examples:
+              acme:
+                value:
+                  organization_name: Acme
+      responses:
+        "201":
+          description: The signed invitation token and its metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvitationResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Caller is not an org admin.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                notAdmin:
+                  value: { message: "only org admins can create invitations" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/feedback-periods:
+    post:
+      tags: [Feedback Periods]
+      summary: Create a feedback period
+      description: |
+        Opens a feedback period for the authenticated employee's organization.
+        The caller must have `role: "org_admin"`; any other role returns `403`.
+        The `organization_name` is taken from the caller's JWT (not the body),
+        so a client cannot open a period for an org they do not belong to.
+      operationId: createFeedbackPeriod
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateFeedbackPeriodRequest"
+            examples:
+              h2:
+                summary: H2 2026
+                value:
+                  name: H2 2026
+                  start_date: "2026-07-01T00:00:00Z"
+                  end_date: "2026-12-31T23:59:59Z"
+      responses:
+        "201":
+          description: The created feedback period.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackPeriodResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Caller is not an org admin.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                notAdmin:
+                  value: { message: "only org admins can create feedback periods" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      tags: [Feedback Periods]
+      summary: List feedback periods
+      description: |
+        Returns the feedback periods for the authenticated employee's
+        organization, ordered by start date descending (most recent first).
+        Any authenticated employee may list periods (an employee needs to see
+        periods in order to file feedback against them). The organization is
+        taken from the caller's JWT, so an employee can only see their own
+        organization's periods.
+      operationId: listFeedbackPeriods
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: The feedback periods for the caller's organization.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackPeriodListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/feedbacks:
+    post:
+      tags: [Feedback]
+      summary: File a feedback entry
+      description: |
+        Files a feedback entry for a colleague. The reviewer is the
+        authenticated employee (taken from the JWT subject), so `reviewer_id`
+        in the body is ignored. A reviewer cannot review themselves.
+
+        Validation:
+          * `period_id` is required and must refer to an existing feedback
+            period (the service validates it before persisting).
+          * `reviewee_id` is required and must differ from the reviewer.
+          * Each of the six score fields must be an integer in [1, 5].
+          * `visibility` defaults to `"private"` when omitted or empty, and
+            must otherwise be one of `public`, `private`, `manager_only`.
+      operationId: createFeedback
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateFeedbackRequest"
+            examples:
+              sample:
+                value:
+                  period_id: 0190abcd-0000-7000-8000-000000000000
+                  reviewee_id: 0190bbbb-0000-7000-8000-000000000000
+                  communication_score: 4
+                  leadership_score: 5
+                  technical_score: 3
+                  collaboration_score: 4
+                  delivery_score: 5
+                  trust_score: 2
+                  strengths_comment: great teammate
+                  weaknesses_comment: could document more
+                  visibility: private
+      responses:
+        "201":
+          description: The created feedback entry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+# ----------------------------------------------------------------------------
+# Components
+# ----------------------------------------------------------------------------
+components:
+  parameters:
+    VerificationToken:
+      name: token
+      in: query
+      required: true
+      description: The email-verification JWT issued at registration.
+      schema:
+        type: string
+      example: eyJhbGciOiJIUzI1NiIs...
+
+    ListLimit:
+      name: limit
+      in: query
+      required: false
+      description: |
+        Page size. Non-numeric or `<= 0` falls back to the default (20);
+        values above `100` are capped.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+      example: 20
+
+    ListCursor:
+      name: cursor
+      in: query
+      required: false
+      description: |
+        The `next_cursor` value from the previous page (an employee ID).
+        Omit on the first page. An unknown cursor returns `400 "unknown cursor"`.
+      schema:
+        type: string
+      example: 0190aaaa-0000-7000-8000-000000000000
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid Bearer token.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            unauthorized:
+              value: { message: "missing or invalid token" }
+
+    ValidationError:
+      description: |
+        Malformed request body or a failed validation. The `message` carries
+        the specific reason (e.g. `"name is required"`,
+        `"end_date must be after start_date"`,
+        `"period_id does not refer to an existing feedback period"`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            invalidBody:
+              value: { message: "invalid request body" }
+            validation:
+              value: { message: "name is required" }
+
+    InternalError:
+      description: Unexpected server error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            internal:
+              value: { message: "failed to register employee" }
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        A signed JWT obtained from `POST /v1/login`. Send as
+        `Authorization: Bearer <access_token>`.
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        message:
+          type: string
+          description: A human-readable description of the error.
+      required: [message]
+
+    Role:
+      type: string
+      description: The authorization role of an employee within their organization.
+      enum:
+        - org_admin
+        - user
+      examples:
+        - org_admin
+
+    FeedbackVisibility:
+      type: string
+      description: Who may see a feedback entry.
+      enum:
+        - public
+        - private
+        - manager_only
+      examples:
+        - private
+
+    Score:
+      type: integer
+      description: A Likert-style score in the range 1–5.
+      minimum: 1
+      maximum: 5
+      example: 4
+
+    EmployeeResponse:
+      type: object
+      description: The representation of an employee returned to clients. The `password` field is omitted.
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        organization_name:
+          type: string
+        role:
+          $ref: "#/components/schemas/Role"
+        manager_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: The employee ID of the user's manager, or null.
+        title:
+          type: string
+        email:
+          type: string
+          format: email
+        is_mail_verified:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - name
+        - organization_name
+        - role
+        - title
+        - email
+        - is_mail_verified
+        - created_at
+        - updated_at
+      example:
+        id: 0190aaaa-0000-7000-8000-000000000000
+        name: Alice
+        organization_name: Acme
+        role: org_admin
+        manager_id: null
+        title: Senior Engineer
+        email: alice@example.com
+        is_mail_verified: true
+        created_at: "2026-08-18T10:00:00Z"
+        updated_at: "2026-08-18T10:00:00Z"
+
+    EmployeeListResponse:
+      type: object
+      description: One page of employees plus the next-page cursor.
+      properties:
+        employees:
+          type: array
+          description: The employees on this page. Never null (empty array when no members).
+          items:
+            $ref: "#/components/schemas/EmployeeResponse"
+        next_cursor:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            The ID of the last employee on this page; pass it as `cursor` on
+            the next request. Null when there are no more pages.
+      required: [employees, next_cursor]
+      example:
+        employees:
+          - id: 0190aaaa-0000-7000-8000-000000000000
+            name: Alice
+            organization_name: Acme
+            role: org_admin
+            manager_id: null
+            title: Senior Engineer
+            email: alice@example.com
+            is_mail_verified: true
+            created_at: "2026-08-18T10:00:00Z"
+            updated_at: "2026-08-18T10:00:00Z"
+        next_cursor: 0190aaaa-0000-7000-8000-000000000000
+
+    RegisterEmployeeRequest:
+      type: object
+      description: Request body for `POST /v1/register`.
+      properties:
+        name:
+          type: string
+          description: Trimmed; must not be empty.
+        organization_name:
+          type: string
+          description: Required when `invite_token` is empty (first admin); ignored otherwise.
+        role:
+          $ref: "#/components/schemas/Role"
+          description: Omitted/ignored on input — the server assigns it from `invite_token`.
+        manager_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Employee ID of the user's manager, or null.
+        title:
+          type: string
+          description: Job title. Defaults to "".
+        email:
+          type: string
+          format: email
+          description: Stored lowercased; uniqueness is global across organizations.
+        password:
+          type: string
+          format: password
+          description: Plaintext; max 64 characters. Hashed server-side and never returned.
+          maxLength: 64
+        invite_token:
+          type: string
+          description: |
+            If empty, the employee is created with `role: "org_admin"` (the
+            first admin). If a valid invitation token is supplied, `role: "user"`.
+          default: ""
+      required: [name, organization_name, email, password]
+
+    LoginRequest:
+      type: object
+      description: Request body for `POST /v1/login`.
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+      required: [email, password]
+      example:
+        email: alice@example.com
+        password: supersecret
+
+    LoginResponse:
+      type: object
+      description: Returned by `POST /v1/login` on success.
+      properties:
+        access_token:
+          type: string
+          description: "A signed JWT (HS256). Send as `Authorization: Bearer <access_token>`."
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_in:
+          type: integer
+          description: Token lifetime in seconds.
+          example: 86400
+        employee:
+          $ref: "#/components/schemas/EmployeeResponse"
+      required: [access_token, token_type, expires_in, employee]
+
+    CreateInvitationRequest:
+      type: object
+      description: Request body for `POST /v1/invitation`.
+      properties:
+        organization_name:
+          type: string
+          description: The organization the invitee will join.
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            ISO 8601 timestamp overriding the default 7-day lifetime. If
+            omitted the token expires after 7 days. Must be in the future.
+      required: [organization_name]
+      example:
+        organization_name: Acme
+
+    InvitationResponse:
+      type: object
+      description: The signed invitation token and its metadata.
+      properties:
+        token:
+          type: string
+          description: The signed JWT the bearer presents at registration.
+        id:
+          type: string
+          format: uuid
+        created_by:
+          type: string
+          format: uuid
+          description: The inviter employee ID.
+        organization_name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+      required: [token, id, created_by, organization_name, created_at, expires_at]
+      example:
+        token: eyJhbGciOiJIUzI1NiIs...
+        id: 0190abcd-0000-7000-8000-000000000000
+        created_by: 0190aaaa-0000-7000-8000-000000000000
+        organization_name: Acme
+        created_at: "2026-08-18T10:00:00Z"
+        expires_at: "2026-08-25T10:00:00Z"
+
+    CreateFeedbackPeriodRequest:
+      type: object
+      description: |
+        Request body for `POST /v1/feedback-periods`. `organization_name` is
+        taken from the JWT and is not trusted from the body.
+      properties:
+        name:
+          type: string
+          description: Trimmed; must not be empty.
+        start_date:
+          type: string
+          format: date-time
+          description: Must not be the zero time.
+        end_date:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            Required (must not be the zero time) and must be after
+            `start_date`. Nullable on input for client convenience but always
+            present in the response.
+      required: [name, start_date, end_date]
+
+    FeedbackPeriodResponse:
+      type: object
+      description: A feedback period.
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        organization_name:
+          type: string
+        start_date:
+          type: string
+          format: date-time
+        end_date:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required: [id, name, organization_name, start_date, end_date, created_at, updated_at]
+      example:
+        id: 0190abcd-0000-7000-8000-000000000000
+        name: H2 2026
+        organization_name: Acme
+        start_date: "2026-07-01T00:00:00Z"
+        end_date: "2026-12-31T23:59:59Z"
+        created_at: "2026-08-18T10:00:00Z"
+        updated_at: "2026-08-18T10:00:00Z"
+
+    FeedbackPeriodListResponse:
+      type: object
+      description: The list of feedback periods for an organization.
+      properties:
+        periods:
+          type: array
+          description: The periods, ordered by start_date descending. Never null.
+          items:
+            $ref: "#/components/schemas/FeedbackPeriodResponse"
+      required: [periods]
+
+    CreateFeedbackRequest:
+      type: object
+      description: |
+        Request body for `POST /v1/feedbacks`. The reviewer is taken from the
+        JWT and `reviewer_id` in the body is ignored.
+      properties:
+        period_id:
+          type: string
+          format: uuid
+          description: Must refer to an existing feedback period.
+        reviewee_id:
+          type: string
+          format: uuid
+          description: Must differ from the reviewer (no self-review).
+        communication_score:
+          $ref: "#/components/schemas/Score"
+        leadership_score:
+          $ref: "#/components/schemas/Score"
+        technical_score:
+          $ref: "#/components/schemas/Score"
+        collaboration_score:
+          $ref: "#/components/schemas/Score"
+        delivery_score:
+          $ref: "#/components/schemas/Score"
+        trust_score:
+          $ref: "#/components/schemas/Score"
+        strengths_comment:
+          type: string
+          default: ""
+        weaknesses_comment:
+          type: string
+          default: ""
+        visibility:
+          $ref: "#/components/schemas/FeedbackVisibility"
+          description: Defaults to `private` when omitted or empty.
+      required:
+        - period_id
+        - reviewee_id
+        - communication_score
+        - leadership_score
+        - technical_score
+        - collaboration_score
+        - delivery_score
+        - trust_score
+
+    FeedbackResponse:
+      type: object
+      description: A feedback entry.
+      properties:
+        id:
+          type: string
+          format: uuid
+        period_id:
+          type: string
+          format: uuid
+        reviewee_id:
+          type: string
+          format: uuid
+        reviewer_id:
+          type: string
+          format: uuid
+          description: The employee who filed the feedback (from the JWT).
+        communication_score:
+          $ref: "#/components/schemas/Score"
+        leadership_score:
+          $ref: "#/components/schemas/Score"
+        technical_score:
+          $ref: "#/components/schemas/Score"
+        collaboration_score:
+          $ref: "#/components/schemas/Score"
+        delivery_score:
+          $ref: "#/components/schemas/Score"
+        trust_score:
+          $ref: "#/components/schemas/Score"
+        strengths_comment:
+          type: string
+        weaknesses_comment:
+          type: string
+        visibility:
+          $ref: "#/components/schemas/FeedbackVisibility"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - period_id
+        - reviewee_id
+        - reviewer_id
+        - communication_score
+        - leadership_score
+        - technical_score
+        - collaboration_score
+        - delivery_score
+        - trust_score
+        - strengths_comment
+        - weaknesses_comment
+        - visibility
+        - created_at
+        - updated_at

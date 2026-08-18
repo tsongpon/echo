@@ -6,6 +6,8 @@ are JSON; responses are JSON. The dev server listens on `http://localhost:1323`.
 | Method | Path                | Auth           | Purpose                                                       |
 |--------|---------------------|----------------|---------------------------------------------------------------|
 | GET    | `/ping`             | —              | Liveness check.                                               |
+| GET    | `/v1/openapi.yaml`  | —              | The OpenAPI 3.1 specification (YAML).                         |
+| GET    | `/v1/docs`          | —              | Interactive Swagger UI (loads `/v1/openapi.yaml`).            |
 | POST   | `/v1/register`      | —              | Create a new employee (sends a verification email).           |
 | GET    | `/v1/verify-email`  | —              | Verify an email using the token from the verification email.  |
 | POST   | `/v1/login`         | —              | Authenticate and obtain a JWT.                                |
@@ -29,6 +31,41 @@ curl -s -w "\nHTTP %{http_code}\n" http://localhost:1323/ping
 ```
 
 Expected response: `HTTP 200` with body `pong`.
+
+---
+
+## OpenAPI Specification & Swagger UI
+
+The API is documented as an OpenAPI 3.1 document, embedded in the binary and
+served at two public endpoints.
+
+### Raw spec
+
+`GET /v1/openapi.yaml` — the OpenAPI 3.1 document as YAML. No auth. Feed this
+URL to any OpenAPI-compatible tool (Swagger UI, Postman, code generators, etc.).
+
+```bash
+curl -s http://localhost:1323/v1/openapi.yaml
+```
+
+The same file is the source of truth at `cmd/server/openapi.yaml` in the repo;
+it is embedded into the binary at build time via `go:embed`, so deployments do
+not ship a separate file. CI lints it with Spectral (see
+`.github/workflows/ci.yml`).
+
+### Interactive docs
+
+`GET /v1/docs` — a Swagger UI page that loads `/v1/openapi.yaml`. No auth. The
+page is a single static HTML document that pulls `swagger-ui-bundle.js` from a
+public CDN; there is no Go-side dependency or asset pipeline.
+
+Open `http://localhost:1323/v1/docs` in a browser to explore and try the
+endpoints interactively.
+
+| Endpoint             | Auth | Purpose                                  |
+|----------------------|------|------------------------------------------|
+| `GET /v1/openapi.yaml` | —  | Raw OpenAPI 3.1 spec (YAML).            |
+| `GET /v1/docs`         | —  | Swagger UI (loads the spec).             |
 
 ---
 

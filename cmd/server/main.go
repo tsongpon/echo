@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	_ "embed"
 	"encoding/hex"
 	"errors"
 	"log/slog"
@@ -21,6 +22,40 @@ import (
 	"github.com/tsongpon/echo/internal/repository"
 	"github.com/tsongpon/echo/internal/service"
 )
+
+// openapiSpec is the embedded OpenAPI 3.1 document served at /v1/openapi.yaml.
+// Using go:embed keeps the spec in the binary so deployments don't ship a
+// separate file; the spec stays the source of truth at repo root.
+//
+//go:embed openapi.yaml
+var openapiSpec []byte
+
+// swaggerUIPage is a minimal Swagger UI page that loads the spec from
+// /v1/openapi.yaml. The HTML is static and pulls swagger-ui-bundle.js from a
+// public CDN, so no Go dependency or asset pipeline is needed.
+const swaggerUIPage = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Echo API Docs</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js" crossorigin></script>
+  <script>
+    window.onload = () => {
+      window.ui = SwaggerUIBundle({
+        url: "/v1/openapi.yaml",
+        dom_id: "#swagger-ui",
+        deepLinking: true,
+        presets: [SwaggerUIBundle.presets.apis],
+        layout: "BaseLayout",
+      });
+    };
+  </script>
+</body>
+</html>`
 
 func main() {
 	if err := godotenv.Load(); err != nil {
@@ -87,6 +122,12 @@ func main() {
 
 	e.GET("/ping", func(c *echo.Context) error {
 		return c.String(http.StatusOK, "pong")
+	})
+	e.GET("/v1/openapi.yaml", func(c *echo.Context) error {
+		return c.Blob(http.StatusOK, "text/yaml; charset=utf-8", openapiSpec)
+	})
+	e.GET("/v1/docs", func(c *echo.Context) error {
+		return c.HTML(http.StatusOK, swaggerUIPage)
 	})
 	e.POST("/v1/register", employeeHandler.Register)
 	e.POST("/v1/login", employeeHandler.Login)
