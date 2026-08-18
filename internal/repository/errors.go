@@ -18,3 +18,9 @@ var ErrConcurrentUpdate = errors.New("employee was modified concurrently")
 var ErrNilFeedbackPeriod = errors.New("feedback period must not be nil")
 
 var ErrNilFeedbackPeriodID = errors.New("feedback period ID must not be nil or empty")
+
+// ErrNilFeedback is returned when a nil feedback entry is provided to a
+// repository method that requires a non-nil feedback.
+var ErrNilFeedback = errors.New("feedback must not be nil")
+
+var ErrNilFeedbackID = errors.New("feedback ID must not be nil or empty")

@@ -1,0 +1,192 @@
+package service
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+
+	"github.com/google/uuid"
+
+	"github.com/tsongpon/echo/internal/apperror"
+	"github.com/tsongpon/echo/internal/model"
+)
+
+// minScore and maxScore bound the six numeric score fields on a feedback entry.
+// They mirror the Likert-style range used by the dto package's request
+// validation, and are duplicated here rather than imported to keep the service
+// layer independent of the transport layer.
+const (
+	minScore = 1
+	maxScore = 5
+)
+
+// FeedbackRepository is the consumer-defined contract for the feedback
+// repository. It is intentionally minimal: only the operations the service
+// actually needs. The concrete repository implementation satisfies it
+// implicitly.
+type FeedbackRepository interface {
+	Create(ctx context.Context, feedback *model.Feedback) (*model.Feedback, error)
+}
+
+// FeedbackPeriodLookup is the consumer-defined contract for resolving a feedback
+// period by ID. It is a subset of FeedbackPeriodRepository so the feedback
+// service can validate that a feedback entry's period_id refers to an existing
+// period without depending on the full period repository or its create path.
+type FeedbackPeriodLookup interface {
+	GetByID(ctx context.Context, id string) (*model.FeedbackPeriod, error)
+}
+
+// FeedbackService is the application layer that orchestrates feedback
+// operations against a FeedbackRepository. It validates that a feedback entry's
+// period_id refers to an existing feedback period via the injected
+// FeedbackPeriodLookup before persisting.
+type FeedbackService struct {
+	repo        FeedbackRepository
+	periods     FeedbackPeriodLookup
+	logger      *slog.Logger
+}
+
+// NewFeedbackService creates a FeedbackService backed by the given feedback
+// repository and feedback-period lookup. If logger is nil, slog.Default() is
+// used. periods may be nil to disable period-existence validation (useful in
+// tests that don't care about the period); in production it should always be
+// provided.
+func NewFeedbackService(repo FeedbackRepository, periods FeedbackPeriodLookup, logger *slog.Logger) *FeedbackService {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &FeedbackService{repo: repo, periods: periods, logger: logger}
+}
+
+// Create creates a new feedback entry after validating the input. The reviewer
+// is identified by reviewerID, which is taken from the authenticated JWT by the
+// handler and assigned here so a client cannot file feedback on someone else's
+// behalf. A UUIDv7 ID is assigned and CreatedAt/UpdatedAt are set by the
+// repository on persist. The reviewer cannot review themselves.
+//
+// Validation:
+//   - period_id is required (non-empty after trim).
+//   - reviewee_id is required (non-empty after trim).
+//   - reviewer_id is required (non-empty after trim).
+//   - reviewee_id must differ from reviewer_id (no self-review).
+//   - each of the six score fields must be in [minScore, maxScore].
+//   - visibility defaults to private when empty, and must otherwise be one of
+//     the defined model.FeedbackVisibility constants.
+func (s *FeedbackService) Create(ctx context.Context, reviewerID string, feedback *model.Feedback) (*model.Feedback, error) {
+	if feedback == nil {
+		s.logger.Warn("feedback create rejected: nil feedback", "reviewer_id", reviewerID)
+		return nil, apperror.ErrInvalidFeedback("feedback must not be nil")
+	}
+	if strings.TrimSpace(reviewerID) == "" {
+		s.logger.Warn("feedback create rejected: missing reviewer_id", "period_id", feedback.PeriodID, "reviewee_id", feedback.RevieweeID)
+		return nil, apperror.ErrInvalidFeedback("reviewer_id is required")
+	}
+	if strings.TrimSpace(feedback.PeriodID) == "" {
+		s.logger.Warn("feedback create rejected: missing period_id", "reviewer_id", reviewerID, "reviewee_id", feedback.RevieweeID)
+		return nil, apperror.ErrInvalidFeedback("period_id is required")
+	}
+	if s.periods != nil {
+		if _, err := s.periods.GetByID(ctx, feedback.PeriodID); err != nil {
+			if errors.Is(err, apperror.ErrFeedbackPeriodNotFound) {
+				s.logger.Warn("feedback create rejected: period not found",
+					"reviewer_id", reviewerID, "period_id", feedback.PeriodID, "reviewee_id", feedback.RevieweeID)
+				return nil, apperror.ErrInvalidFeedback("period_id does not refer to an existing feedback period")
+			}
+			s.logger.Error("feedback create aborted: period lookup failed",
+				"error", err, "reviewer_id", reviewerID, "period_id", feedback.PeriodID)
+			return nil, fmt.Errorf("validate feedback period: %w", err)
+		}
+	}
+	if strings.TrimSpace(feedback.RevieweeID) == "" {
+		s.logger.Warn("feedback create rejected: missing reviewee_id", "reviewer_id", reviewerID, "period_id", feedback.PeriodID)
+		return nil, apperror.ErrInvalidFeedback("reviewee_id is required")
+	}
+	if feedback.RevieweeID == reviewerID {
+		s.logger.Warn("feedback create rejected: self-review", "reviewer_id", reviewerID, "period_id", feedback.PeriodID)
+		return nil, apperror.ErrInvalidFeedback("reviewer cannot review themselves")
+	}
+	if err := validateScore("communication_score", feedback.CommunicationScore); err != nil {
+		s.logger.Warn("feedback create rejected: invalid communication_score",
+			"reviewer_id", reviewerID, "period_id", feedback.PeriodID, "score", feedback.CommunicationScore)
+		return nil, err
+	}
+	if err := validateScore("leadership_score", feedback.LeadershipScore); err != nil {
+		s.logger.Warn("feedback create rejected: invalid leadership_score",
+			"reviewer_id", reviewerID, "period_id", feedback.PeriodID, "score", feedback.LeadershipScore)
+		return nil, err
+	}
+	if err := validateScore("technical_score", feedback.TechnicalScore); err != nil {
+		s.logger.Warn("feedback create rejected: invalid technical_score",
+			"reviewer_id", reviewerID, "period_id", feedback.PeriodID, "score", feedback.TechnicalScore)
+		return nil, err
+	}
+	if err := validateScore("collaboration_score", feedback.CollaborationScore); err != nil {
+		s.logger.Warn("feedback create rejected: invalid collaboration_score",
+			"reviewer_id", reviewerID, "period_id", feedback.PeriodID, "score", feedback.CollaborationScore)
+		return nil, err
+	}
+	if err := validateScore("delivery_score", feedback.DeliveryScore); err != nil {
+		s.logger.Warn("feedback create rejected: invalid delivery_score",
+			"reviewer_id", reviewerID, "period_id", feedback.PeriodID, "score", feedback.DeliveryScore)
+		return nil, err
+	}
+	if err := validateScore("trust_score", feedback.TrustScore); err != nil {
+		s.logger.Warn("feedback create rejected: invalid trust_score",
+			"reviewer_id", reviewerID, "period_id", feedback.PeriodID, "score", feedback.TrustScore)
+		return nil, err
+	}
+	if feedback.Visibility != "" && !validVisibility(feedback.Visibility) {
+		s.logger.Warn("feedback create rejected: invalid visibility",
+			"reviewer_id", reviewerID, "period_id", feedback.PeriodID, "visibility", string(feedback.Visibility))
+		return nil, apperror.ErrInvalidFeedback("visibility must be one of public, private, manager_only")
+	}
+	feedback.Visibility = normalizeVisibility(feedback.Visibility)
+
+	feedback.ReviewerID = reviewerID
+	id, err := uuid.NewV7()
+	if err != nil {
+		s.logger.Error("feedback create aborted: failed to generate UUID", "error", err, "reviewer_id", reviewerID)
+		return nil, err
+	}
+	feedback.ID = id.String()
+
+	created, err := s.repo.Create(ctx, feedback)
+	if err != nil {
+		s.logger.Error("feedback create aborted: repository create failed",
+			"error", err, "feedback_id", feedback.ID, "reviewer_id", reviewerID, "reviewee_id", feedback.RevieweeID, "period_id", feedback.PeriodID)
+		return nil, err
+	}
+	return created, nil
+}
+
+// validateScore returns an ErrInvalidFeedback when the score is outside the
+// allowed Likert range.
+func validateScore(field string, score int) error {
+	if score < minScore || score > maxScore {
+		return apperror.ErrInvalidFeedback(field + " must be between 1 and 5")
+	}
+	return nil
+}
+
+// normalizeVisibility defaults an empty visibility to private and otherwise
+// leaves a valid value untouched. It does not reject unknown values: that is
+// the caller's responsibility via validVisibility below.
+func normalizeVisibility(v model.FeedbackVisibility) model.FeedbackVisibility {
+	if v == "" {
+		return model.FeedbackVisibilityPrivate
+	}
+	return v
+}
+
+// validVisibility reports whether v is one of the defined
+// model.FeedbackVisibility constants.
+func validVisibility(v model.FeedbackVisibility) bool {
+	switch v {
+	case model.FeedbackVisibilityPublic, model.FeedbackVisibilityPrivate, model.FeedbackVisibilityManagerOnly:
+		return true
+	default:
+		return false
+	}
+}

@@ -1,0 +1,334 @@
+package service
+
+import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"testing"
+
+	"github.com/tsongpon/echo/internal/apperror"
+	"github.com/tsongpon/echo/internal/model"
+)
+
+// fakeFeedbackRepo is an in-test stand-in for service.FeedbackRepository that
+// records the feedback passed to Create without going through the real
+// repository package (which would create an import cycle).
+type fakeFeedbackRepo struct {
+	created  *model.Feedback
+	createFn func(ctx context.Context, feedback *model.Feedback) (*model.Feedback, error)
+}
+
+func (f *fakeFeedbackRepo) Create(ctx context.Context, feedback *model.Feedback) (*model.Feedback, error) {
+	if f.createFn != nil {
+		return f.createFn(ctx, feedback)
+	}
+	f.created = feedback
+	return feedback, nil
+}
+
+// fakePeriodLookup is an in-test stand-in for service.FeedbackPeriodLookup.
+// By default it resolves any ID to a non-nil period (the happy path); tests
+// can override getFn to simulate a missing period or a repository failure.
+type fakePeriodLookup struct {
+	gotID   string
+	getFn  func(ctx context.Context, id string) (*model.FeedbackPeriod, error)
+}
+
+func (f *fakePeriodLookup) GetByID(ctx context.Context, id string) (*model.FeedbackPeriod, error) {
+	f.gotID = id
+	if f.getFn != nil {
+		return f.getFn(ctx, id)
+	}
+	return &model.FeedbackPeriod{ID: id, Name: "Test Period"}, nil
+}
+
+// newFeedbackTestService builds a FeedbackService backed by a fake feedback
+// repo, a fake period lookup (happy path: any period ID resolves), and a
+// discarding logger. Returns the period lookup so tests can override its
+// behavior or assert on which ID was looked up.
+func newFeedbackTestService() (*FeedbackService, *fakeFeedbackRepo, *fakePeriodLookup) {
+	repo := &fakeFeedbackRepo{}
+	periods := &fakePeriodLookup{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return NewFeedbackService(repo, periods, logger), repo, periods
+}
+
+// validFeedbackInput returns a feedback with all required fields and valid
+// scores, for use as a base in tests.
+func validFeedbackInput() *model.Feedback {
+	return &model.Feedback{
+		PeriodID:           "period-1",
+		RevieweeID:         "reviewee-1",
+		CommunicationScore: 4,
+		LeadershipScore:    5,
+		TechnicalScore:     3,
+		CollaborationScore: 4,
+		DeliveryScore:      5,
+		TrustScore:         2,
+		StrengthsComment:   "great teammate",
+		WeaknessesComment:  "could document more",
+		Visibility:         model.FeedbackVisibilityPrivate,
+	}
+}
+
+func TestFeedback_Create(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		svc, repo, periods := newFeedbackTestService()
+		feedback := validFeedbackInput()
+
+		created, err := svc.Create(context.Background(), "reviewer-1", feedback)
+		if err != nil {
+			t.Fatalf("Create: unexpected error: %v", err)
+		}
+
+		// The reviewer is taken from the caller (the JWT subject), not the
+		// body, so a client cannot file feedback on someone else's behalf.
+		if created.ReviewerID != "reviewer-1" {
+			t.Fatalf("got reviewer_id %q, want reviewer-1 (from caller)", created.ReviewerID)
+		}
+		if created.RevieweeID != "reviewee-1" {
+			t.Fatalf("got reviewee_id %q, want reviewee-1", created.RevieweeID)
+		}
+		if created.ID == "" {
+			t.Fatal("expected a non-empty ID assigned by the service")
+		}
+		if repo.created == nil {
+			t.Fatal("expected the repo to have received the feedback")
+		}
+		// The service must have looked up the period by ID before persisting.
+		if periods.gotID != "period-1" {
+			t.Fatalf("service looked up period %q, want period-1", periods.gotID)
+		}
+		if repo.created.ID != created.ID {
+			t.Fatalf("repo received id %q, want %q", repo.created.ID, created.ID)
+		}
+	})
+
+	t.Run("overrides client reviewer_id", func(t *testing.T) {
+		svc, _, _ := newFeedbackTestService()
+		// Client sets a different reviewer; the caller's must win.
+		feedback := validFeedbackInput()
+		feedback.ReviewerID = "should-be-ignored"
+		created, err := svc.Create(context.Background(), "reviewer-1", feedback)
+		if err != nil {
+			t.Fatalf("Create: unexpected error: %v", err)
+		}
+		if created.ReviewerID != "reviewer-1" {
+			t.Fatalf("got reviewer_id %q, want reviewer-1 (caller wins)", created.ReviewerID)
+		}
+	})
+
+	t.Run("empty visibility defaults to private", func(t *testing.T) {
+		svc, repo, _ := newFeedbackTestService()
+		feedback := validFeedbackInput()
+		feedback.Visibility = ""
+
+		_, err := svc.Create(context.Background(), "reviewer-1", feedback)
+		if err != nil {
+			t.Fatalf("Create: unexpected error: %v", err)
+		}
+		if repo.created.Visibility != model.FeedbackVisibilityPrivate {
+			t.Fatalf("got visibility %q, want private", repo.created.Visibility)
+		}
+	})
+
+	t.Run("visibility public honored", func(t *testing.T) {
+		svc, repo, _ := newFeedbackTestService()
+		feedback := validFeedbackInput()
+		feedback.Visibility = model.FeedbackVisibilityPublic
+
+		_, err := svc.Create(context.Background(), "reviewer-1", feedback)
+		if err != nil {
+			t.Fatalf("Create: unexpected error: %v", err)
+		}
+		if repo.created.Visibility != model.FeedbackVisibilityPublic {
+			t.Fatalf("got visibility %q, want public", repo.created.Visibility)
+		}
+	})
+
+	t.Run("visibility manager_only honored", func(t *testing.T) {
+		svc, repo, _ := newFeedbackTestService()
+		feedback := validFeedbackInput()
+		feedback.Visibility = model.FeedbackVisibilityManagerOnly
+
+		_, err := svc.Create(context.Background(), "reviewer-1", feedback)
+		if err != nil {
+			t.Fatalf("Create: unexpected error: %v", err)
+		}
+		if repo.created.Visibility != model.FeedbackVisibilityManagerOnly {
+			t.Fatalf("got visibility %q, want manager_only", repo.created.Visibility)
+		}
+	})
+
+	t.Run("self-review rejected", func(t *testing.T) {
+		svc, _, _ := newFeedbackTestService()
+		feedback := validFeedbackInput()
+		feedback.RevieweeID = "reviewer-1"
+
+		_, err := svc.Create(context.Background(), "reviewer-1", feedback)
+		if err == nil {
+			t.Fatal("expected error for self-review, got nil")
+		}
+		if !apperror.IsInvalidFeedback(err) {
+			t.Fatalf("expected ErrInvalidFeedback, got %T: %v", err, err)
+		}
+		if err.Error() != "reviewer cannot review themselves" {
+			t.Fatalf("expected self-review message, got %q", err.Error())
+		}
+	})
+
+	t.Run("repository error propagates", func(t *testing.T) {
+		repo := &fakeFeedbackRepo{
+			createFn: func(_ context.Context, _ *model.Feedback) (*model.Feedback, error) {
+				return nil, errors.New("db down")
+			},
+		}
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		_, err := svc.Create(context.Background(), "reviewer-1", validFeedbackInput())
+		if err == nil {
+			t.Fatal("expected repository error to propagate, got nil")
+		}
+	})
+
+	t.Run("period not found is rejected", func(t *testing.T) {
+		svc, _, periods := newFeedbackTestService()
+		periods.getFn = func(_ context.Context, _ string) (*model.FeedbackPeriod, error) {
+			return nil, apperror.ErrFeedbackPeriodNotFound
+		}
+		_, err := svc.Create(context.Background(), "reviewer-1", validFeedbackInput())
+		if err == nil {
+			t.Fatal("expected error for unknown period, got nil")
+		}
+		if !apperror.IsInvalidFeedback(err) {
+			t.Fatalf("expected ErrInvalidFeedback, got %T: %v", err, err)
+		}
+		if err.Error() != "period_id does not refer to an existing feedback period" {
+			t.Fatalf("expected period-not-found message, got %q", err.Error())
+		}
+	})
+
+	t.Run("period lookup error propagates", func(t *testing.T) {
+		svc, _, periods := newFeedbackTestService()
+		periods.getFn = func(_ context.Context, _ string) (*model.FeedbackPeriod, error) {
+			return nil, errors.New("firestore unavailable")
+		}
+		_, err := svc.Create(context.Background(), "reviewer-1", validFeedbackInput())
+		if err == nil {
+			t.Fatal("expected period lookup error to propagate, got nil")
+		}
+		// Non-not-found errors should surface as a wrapped error, not an
+		// ErrInvalidFeedback, so the handler maps them to 500 rather than 400.
+		if apperror.IsInvalidFeedback(err) {
+			t.Fatalf("expected a non-validation error, got ErrInvalidFeedback: %v", err)
+		}
+	})
+}
+
+func TestFeedback_Create_ValidationErrors(t *testing.T) {
+	cases := []struct {
+		name       string
+		reviewerID string
+		feedback   *model.Feedback
+		wantMsg    string
+	}{
+		{
+			name:       "nil feedback",
+			reviewerID: "reviewer-1",
+			feedback:   nil,
+			wantMsg:    "feedback must not be nil",
+		},
+		{
+			name:       "missing reviewer_id",
+			reviewerID: "",
+			feedback:   validFeedbackInput(),
+			wantMsg:    "reviewer_id is required",
+		},
+		{
+			name:       "blank reviewer_id",
+			reviewerID: "   ",
+			feedback:   validFeedbackInput(),
+			wantMsg:    "reviewer_id is required",
+		},
+		{
+			name:       "missing period_id",
+			reviewerID: "reviewer-1",
+			feedback:   &model.Feedback{RevieweeID: "reviewee-1", CommunicationScore: 1, LeadershipScore: 1, TechnicalScore: 1, CollaborationScore: 1, DeliveryScore: 1, TrustScore: 1},
+			wantMsg:    "period_id is required",
+		},
+		{
+			name:       "missing reviewee_id",
+			reviewerID: "reviewer-1",
+			feedback:   &model.Feedback{PeriodID: "period-1", CommunicationScore: 1, LeadershipScore: 1, TechnicalScore: 1, CollaborationScore: 1, DeliveryScore: 1, TrustScore: 1},
+			wantMsg:    "reviewee_id is required",
+		},
+		{
+			name:       "communication_score below range",
+			reviewerID: "reviewer-1",
+			feedback:   &model.Feedback{PeriodID: "period-1", RevieweeID: "reviewee-1", CommunicationScore: 0, LeadershipScore: 1, TechnicalScore: 1, CollaborationScore: 1, DeliveryScore: 1, TrustScore: 1},
+			wantMsg:    "communication_score must be between 1 and 5",
+		},
+		{
+			name:       "communication_score above range",
+			reviewerID: "reviewer-1",
+			feedback:   &model.Feedback{PeriodID: "period-1", RevieweeID: "reviewee-1", CommunicationScore: 6, LeadershipScore: 1, TechnicalScore: 1, CollaborationScore: 1, DeliveryScore: 1, TrustScore: 1},
+			wantMsg:    "communication_score must be between 1 and 5",
+		},
+		{
+			name:       "leadership_score out of range",
+			reviewerID: "reviewer-1",
+			feedback:   &model.Feedback{PeriodID: "period-1", RevieweeID: "reviewee-1", CommunicationScore: 1, LeadershipScore: 7, TechnicalScore: 1, CollaborationScore: 1, DeliveryScore: 1, TrustScore: 1},
+			wantMsg:    "leadership_score must be between 1 and 5",
+		},
+		{
+			name:       "technical_score out of range",
+			reviewerID: "reviewer-1",
+			feedback:   &model.Feedback{PeriodID: "period-1", RevieweeID: "reviewee-1", CommunicationScore: 1, LeadershipScore: 1, TechnicalScore: 0, CollaborationScore: 1, DeliveryScore: 1, TrustScore: 1},
+			wantMsg:    "technical_score must be between 1 and 5",
+		},
+		{
+			name:       "collaboration_score out of range",
+			reviewerID: "reviewer-1",
+			feedback:   &model.Feedback{PeriodID: "period-1", RevieweeID: "reviewee-1", CommunicationScore: 1, LeadershipScore: 1, TechnicalScore: 1, CollaborationScore: 9, DeliveryScore: 1, TrustScore: 1},
+			wantMsg:    "collaboration_score must be between 1 and 5",
+		},
+		{
+			name:       "delivery_score out of range",
+			reviewerID: "reviewer-1",
+			feedback:   &model.Feedback{PeriodID: "period-1", RevieweeID: "reviewee-1", CommunicationScore: 1, LeadershipScore: 1, TechnicalScore: 1, CollaborationScore: 1, DeliveryScore: -1, TrustScore: 1},
+			wantMsg:    "delivery_score must be between 1 and 5",
+		},
+		{
+			name:       "trust_score out of range",
+			reviewerID: "reviewer-1",
+			feedback:   &model.Feedback{PeriodID: "period-1", RevieweeID: "reviewee-1", CommunicationScore: 1, LeadershipScore: 1, TechnicalScore: 1, CollaborationScore: 1, DeliveryScore: 1, TrustScore: 99},
+			wantMsg:    "trust_score must be between 1 and 5",
+		},
+		{
+			name:       "invalid visibility value",
+			reviewerID: "reviewer-1",
+			feedback: func() *model.Feedback {
+				f := validFeedbackInput()
+				f.Visibility = "secret"
+				return f
+			}(),
+			wantMsg: "visibility must be one of public, private, manager_only",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, _, _ := newFeedbackTestService()
+			_, err := svc.Create(context.Background(), tc.reviewerID, tc.feedback)
+			if err == nil {
+				t.Fatalf("expected validation error, got nil")
+			}
+			if !apperror.IsInvalidFeedback(err) {
+				t.Fatalf("expected ErrInvalidFeedback, got %T: %v", err, err)
+			}
+			if err.Error() != tc.wantMsg {
+				t.Fatalf("expected message %q, got %q", tc.wantMsg, err.Error())
+			}
+		})
+	}
+}

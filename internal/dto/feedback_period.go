@@ -6,7 +6,7 @@ import (
 	"github.com/tsongpon/echo/internal/model"
 )
 
-// CreateFeedbackPeriodRequest is the request body for POST /v1/feedback-period.
+// CreateFeedbackPeriodRequest is the request body for POST /v1/feedback-periods.
 // OrganizationName is taken from the authenticated employee's JWT rather than
 // trusted from the body, so a client cannot create a period for an org they do
 // not belong to; the field here is ignored on input.
@@ -59,4 +59,21 @@ func ToFeedbackPeriodResponse(p *model.FeedbackPeriod) FeedbackPeriodResponse {
 		CreatedAt:        p.CreatedAt,
 		UpdatedAt:        p.UpdatedAt,
 	}
+}
+
+// FeedbackPeriodListResponse is the paginated-style wrapper returned by
+// GET /v1/feedback-periods. The periods slice is never nil: an organization
+// with no periods yet yields { "periods": [] }.
+type FeedbackPeriodListResponse struct {
+	Periods []FeedbackPeriodResponse `json:"periods"`
+}
+
+// ToFeedbackPeriodListResponse maps a slice of domain FeedbackPeriod to the
+// list response shape, ensuring a non-nil slice so the JSON encodes as [].
+func ToFeedbackPeriodListResponse(periods []*model.FeedbackPeriod) FeedbackPeriodListResponse {
+	out := make([]FeedbackPeriodResponse, 0, len(periods))
+	for _, p := range periods {
+		out = append(out, ToFeedbackPeriodResponse(p))
+	}
+	return FeedbackPeriodListResponse{Periods: out}
 }

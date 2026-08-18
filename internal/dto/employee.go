@@ -79,3 +79,30 @@ func ToEmployeeResponse(e *model.Employee) EmployeeResponse {
 		UpdatedAt:        e.UpdatedAt,
 	}
 }
+
+// EmployeeListResponse is the wrapper returned by GET /v1/employees. The
+// employees slice is never nil: an organization with no members yet yields
+// { "employees": [] }. NextCursor is the ID of the last employee on this page
+// and is meant to be passed back as the cursor query parameter to fetch the
+// next page; it is null when there are no more pages.
+type EmployeeListResponse struct {
+	Employees   []EmployeeResponse `json:"employees"`
+	NextCursor  *string            `json:"next_cursor"`
+}
+
+// ToEmployeeListResponse maps a slice of domain Employee to the list response
+// shape, ensuring a non-nil slice so the JSON encodes as []. nextCursorID is
+// the ID of the last employee on the page; pass "" when there is no next page
+// so NextCursor serializes as null.
+func ToEmployeeListResponse(employees []*model.Employee, nextCursorID string) EmployeeListResponse {
+	out := make([]EmployeeResponse, 0, len(employees))
+	for _, e := range employees {
+		out = append(out, ToEmployeeResponse(e))
+	}
+	var cursor *string
+	if nextCursorID != "" {
+		c := nextCursorID
+		cursor = &c
+	}
+	return EmployeeListResponse{Employees: out, NextCursor: cursor}
+}

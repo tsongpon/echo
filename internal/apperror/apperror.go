@@ -39,6 +39,11 @@ var ErrInvalidInvitationToken = errors.New("invalid or expired invitation token"
 // spans organizations.
 var ErrEmailTaken = errors.New("email already taken")
 
+// ErrFeedbackPeriodNotFound is returned when no feedback period matches a
+// lookup. Used by the feedback service when validating that a feedback entry's
+// period_id refers to an existing period.
+var ErrFeedbackPeriodNotFound = errors.New("feedback period not found")
+
 // ErrInvalidEmployee indicates a validation failure of an employee input. It
 // carries a human-readable message describing the failed validation.
 type ErrInvalidEmployee string
@@ -60,5 +65,17 @@ func (e ErrInvalidFeedbackPeriod) Error() string { return string(e) }
 // IsInvalidFeedbackPeriod reports whether err is an ErrInvalidFeedbackPeriod.
 func IsInvalidFeedbackPeriod(err error) bool {
 	var target ErrInvalidFeedbackPeriod
+	return errors.As(err, &target)
+}
+
+// ErrInvalidFeedback indicates a validation failure of a feedback input. It
+// carries a human-readable message describing the failed validation.
+type ErrInvalidFeedback string
+
+func (e ErrInvalidFeedback) Error() string { return string(e) }
+
+// IsInvalidFeedback reports whether err is an ErrInvalidFeedback.
+func IsInvalidFeedback(err error) bool {
+	var target ErrInvalidFeedback
 	return errors.As(err, &target)
 }

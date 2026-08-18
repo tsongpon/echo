@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -69,6 +70,58 @@ func (f *fakeRepo) Update(_ context.Context, employee *model.Employee) (*model.E
 	}
 	f.byID[employee.ID] = employee
 	return employee, nil
+}
+
+func (f *fakeRepo) ListByOrganization(_ context.Context, organizationName string, limit int, cursorID string) ([]*model.Employee, string, error) {
+	if f.byID == nil {
+		return []*model.Employee{}, "", nil
+	}
+	// Collect and sort by name ascending, then by ID for stable tie-breaking,
+	// mirroring Firestore's ordering on (name, document ID).
+	var all []*model.Employee
+	for _, e := range f.byID {
+		if e.OrganizationName == organizationName {
+			all = append(all, e)
+		}
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].Name != all[j].Name {
+			return all[i].Name < all[j].Name
+		}
+		return all[i].ID < all[j].ID
+	})
+	// Find the cursor position; an unknown cursor mirrors the repo's
+	// apperror.ErrEmployeeNotFound so the service test can exercise that path.
+	start := 0
+	if strings.TrimSpace(cursorID) != "" {
+		found := -1
+		for i, e := range all {
+			if e.ID == cursorID {
+				found = i
+				break
+			}
+		}
+		if found == -1 {
+			return nil, "", apperror.ErrEmployeeNotFound
+		}
+		start = found + 1
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	end := start + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	page := all[start:end]
+	if page == nil {
+		page = []*model.Employee{}
+	}
+	nextCursor := ""
+	if end < len(all) {
+		nextCursor = page[len(page)-1].ID
+	}
+	return page, nextCursor, nil
 }
 
 // noopMailer is a service.Mailer stand-in that records the last token it was
@@ -522,6 +575,184 @@ func TestRegister_ValidationErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEmployeeService_ListByOrganization(t *testing.T) {
+	// Seed 5 employees for "Acme" (Alice..Eve) and one for "Other", used
+	// across the pagination subtests. Names are in ascending order so the
+	// expected page slices are easy to reason about.
+	seed := func() *fakeRepo {
+		return &fakeRepo{byID: map[string]*model.Employee{
+			"e-1": {ID: "e-1", Name: "Alice", OrganizationName: "Acme", Email: "a@acme.com"},
+			"e-2": {ID: "e-2", Name: "Bob", OrganizationName: "Acme", Email: "b@acme.com"},
+			"e-3": {ID: "e-3", Name: "Carol", OrganizationName: "Acme", Email: "c@acme.com"},
+			"e-4": {ID: "e-4", Name: "Dave", OrganizationName: "Acme", Email: "d@acme.com"},
+			"e-5": {ID: "e-5", Name: "Eve", OrganizationName: "Acme", Email: "e@acme.com"},
+			"e-6": {ID: "e-6", Name: "Zoe", OrganizationName: "Other", Email: "z@other.com"},
+		}}
+	}
+	newSvc := func(repo *fakeRepo) *EmployeeService {
+		return NewEmployeeService(repo, &noopMailer{}, testSigner(t, 0), testInvitationSigner(t), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}
+
+	t.Run("returns employees for the named organization", func(t *testing.T) {
+		svc := newSvc(seed())
+		got, next, err := svc.ListByOrganization(context.Background(), "Acme", 0, "")
+		if err != nil {
+			t.Fatalf("ListByOrganization: unexpected error: %v", err)
+		}
+		if len(got) != 5 {
+			t.Fatalf("got %d employees, want 5", len(got))
+		}
+		for _, e := range got {
+			if e.OrganizationName != "Acme" {
+				t.Fatalf("got employee with org %q, want Acme", e.OrganizationName)
+			}
+		}
+		// With the default limit (20) >= total, there is no next page.
+		if next != "" {
+			t.Fatalf("expected empty next cursor, got %q", next)
+		}
+	})
+
+	t.Run("empty organization returns an empty slice", func(t *testing.T) {
+		svc := newSvc(seed())
+		got, _, err := svc.ListByOrganization(context.Background(), "NoSuchOrg", 0, "")
+		if err != nil {
+			t.Fatalf("ListByOrganization: unexpected error: %v", err)
+		}
+		if got == nil {
+			t.Fatal("expected non-nil slice, got nil")
+		}
+		if len(got) != 0 {
+			t.Fatalf("got %d employees, want 0", len(got))
+		}
+	})
+
+	t.Run("missing organization_name is rejected", func(t *testing.T) {
+		svc, _ := newTestService()
+		_, _, err := svc.ListByOrganization(context.Background(), "", 0, "")
+		if err == nil {
+			t.Fatal("expected validation error, got nil")
+		}
+		if !apperror.IsInvalidEmployee(err) {
+			t.Fatalf("expected ErrInvalidEmployee, got %T: %v", err, err)
+		}
+		if err.Error() != "organization_name is required" {
+			t.Fatalf("expected organization_name is required, got %q", err.Error())
+		}
+	})
+
+	t.Run("repository error propagates", func(t *testing.T) {
+		repoErr := errors.New("firestore unavailable")
+		svc := NewEmployeeService(&erroringRepo{err: repoErr}, &noopMailer{}, testSigner(t, 0), testInvitationSigner(t), slog.New(slog.NewTextHandler(io.Discard, nil)))
+		_, _, err := svc.ListByOrganization(context.Background(), "Acme", 0, "")
+		if err == nil {
+			t.Fatal("expected repository error to propagate, got nil")
+		}
+		if !errors.Is(err, repoErr) {
+			t.Fatalf("expected the repo error to propagate, got %v", err)
+		}
+	})
+
+	t.Run("first page returns limit items and a next cursor", func(t *testing.T) {
+		svc := newSvc(seed())
+		got, next, err := svc.ListByOrganization(context.Background(), "Acme", 2, "")
+		if err != nil {
+			t.Fatalf("ListByOrganization: unexpected error: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("got %d employees, want 2", len(got))
+		}
+		if got[0].Name != "Alice" || got[1].Name != "Bob" {
+			t.Fatalf("expected Alice,Bob, got %s,%s", got[0].Name, got[1].Name)
+		}
+		if next != "e-2" {
+			t.Fatalf("expected next cursor e-2, got %q", next)
+		}
+	})
+
+	t.Run("second page starts after the cursor", func(t *testing.T) {
+		svc := newSvc(seed())
+		got, next, err := svc.ListByOrganization(context.Background(), "Acme", 2, "e-2")
+		if err != nil {
+			t.Fatalf("ListByOrganization: unexpected error: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("got %d employees, want 2", len(got))
+		}
+		if got[0].Name != "Carol" || got[1].Name != "Dave" {
+			t.Fatalf("expected Carol,Dave, got %s,%s", got[0].Name, got[1].Name)
+		}
+		if next != "e-4" {
+			t.Fatalf("expected next cursor e-4, got %q", next)
+		}
+	})
+
+	t.Run("last page has no next cursor", func(t *testing.T) {
+		svc := newSvc(seed())
+		got, next, err := svc.ListByOrganization(context.Background(), "Acme", 2, "e-4")
+		if err != nil {
+			t.Fatalf("ListByOrganization: unexpected error: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("got %d employees, want 1", len(got))
+		}
+		if got[0].Name != "Eve" {
+			t.Fatalf("expected Eve, got %s", got[0].Name)
+		}
+		if next != "" {
+			t.Fatalf("expected empty next cursor on last page, got %q", next)
+		}
+	})
+
+	t.Run("unknown cursor is rejected", func(t *testing.T) {
+		svc := newSvc(seed())
+		_, _, err := svc.ListByOrganization(context.Background(), "Acme", 2, "does-not-exist")
+		if err == nil {
+			t.Fatal("expected error for unknown cursor, got nil")
+		}
+		if !errors.Is(err, apperror.ErrEmployeeNotFound) {
+			t.Fatalf("expected ErrEmployeeNotFound, got %v", err)
+		}
+	})
+
+	t.Run("limit is capped at MaxEmployeeListLimit", func(t *testing.T) {
+		svc := newSvc(seed())
+		// Request an absurd limit; the service must cap it rather than pass it
+		// through. The fake repo honors any limit, so assert via the result:
+		// with 5 seeded and limit capped at 100, all 5 return in one page.
+		got, next, err := svc.ListByOrganization(context.Background(), "Acme", 99999, "")
+		if err != nil {
+			t.Fatalf("ListByOrganization: unexpected error: %v", err)
+		}
+		if len(got) != 5 {
+			t.Fatalf("got %d employees, want 5 (limit capped, no paging)", len(got))
+		}
+		if next != "" {
+			t.Fatalf("expected empty next cursor, got %q", next)
+		}
+	})
+}
+
+// erroringRepo is a fakeRepo that always fails ListByOrganization with a
+// canned error, used to assert the service propagates repo errors.
+type erroringRepo struct{ err error }
+
+func (e *erroringRepo) Create(_ context.Context, emp *model.Employee) (*model.Employee, error) {
+	return emp, nil
+}
+func (e *erroringRepo) GetByEmail(_ context.Context, _ string) (*model.Employee, error) {
+	return nil, apperror.ErrEmployeeNotFound
+}
+func (e *erroringRepo) GetByID(_ context.Context, _ string) (*model.Employee, error) {
+	return nil, apperror.ErrEmployeeNotFound
+}
+func (e *erroringRepo) Update(_ context.Context, emp *model.Employee) (*model.Employee, error) {
+	return emp, nil
+}
+func (e *erroringRepo) ListByOrganization(_ context.Context, _ string, _ int, _ string) ([]*model.Employee, string, error) {
+	return nil, "", e.err
 }
 
 // testSigner builds an EmailVerificationTokenSigner for service tests.

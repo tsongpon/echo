@@ -2,14 +2,18 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
 	"cloud.google.com/go/firestore"
+	"google.golang.org/api/iterator"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/tsongpon/echo/internal/apperror"
 	"github.com/tsongpon/echo/internal/model"
 	"github.com/tsongpon/echo/internal/service"
 )
@@ -88,6 +92,59 @@ func (r *FeedbackPeriodFirestoreRepository) Create(ctx context.Context, period *
 	}
 
 	return &stored, nil
+}
+
+// GetByID returns the feedback period with the given ID. Returns
+// apperror.ErrFeedbackPeriodNotFound when no period matches.
+func (r *FeedbackPeriodFirestoreRepository) GetByID(ctx context.Context, id string) (*model.FeedbackPeriod, error) {
+	if strings.TrimSpace(id) == "" {
+		return nil, apperror.ErrFeedbackPeriodNotFound
+	}
+
+	snapshot, err := r.client.Collection(FeedbackPeriodCollection).Doc(id).Get(ctx)
+	if status.Code(err) == codes.NotFound {
+		return nil, apperror.ErrFeedbackPeriodNotFound
+	}
+	if err != nil {
+		r.logError("firestore: get feedback period by ID failed", err, "period_id", id)
+		return nil, fmt.Errorf("firestore: get feedback period by ID: %w", err)
+	}
+
+	return r.toFeedbackPeriod(snapshot)
+}
+
+// ListByOrganization returns the feedback periods that belong to the named
+// organization, ordered by start date descending (most recent first). Returns
+// an empty (non-nil) slice when no periods match so callers can distinguish
+// "no periods yet" from a query failure.
+func (r *FeedbackPeriodFirestoreRepository) ListByOrganization(ctx context.Context, organizationName string) ([]*model.FeedbackPeriod, error) {
+	if strings.TrimSpace(organizationName) == "" {
+		return []*model.FeedbackPeriod{}, nil
+	}
+
+	iter := r.client.Collection(FeedbackPeriodCollection).
+		Where("organization_name", "==", organizationName).
+		OrderBy("start_date", firestore.Desc).
+		Documents(ctx)
+	defer iter.Stop()
+
+	periods := []*model.FeedbackPeriod{}
+	for {
+		snapshot, err := iter.Next()
+		if errors.Is(err, iterator.Done) {
+			break
+		}
+		if err != nil {
+			r.logError("firestore: query feedback periods by organization failed", err, "organization_name", organizationName)
+			return nil, fmt.Errorf("firestore: query feedback periods by organization: %w", err)
+		}
+		period, err := r.toFeedbackPeriod(snapshot)
+		if err != nil {
+			return nil, err
+		}
+		periods = append(periods, period)
+	}
+	return periods, nil
 }
 
 // newFeedbackPeriodDocument projects a domain feedback period onto its stored

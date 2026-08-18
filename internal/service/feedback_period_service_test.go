@@ -20,6 +20,7 @@ type fakeFeedbackPeriodRepo struct {
 	created  *model.FeedbackPeriod
 	byID     map[string]*model.FeedbackPeriod
 	createFn func(ctx context.Context, period *model.FeedbackPeriod) (*model.FeedbackPeriod, error)
+	listFn   func(ctx context.Context, organizationName string) ([]*model.FeedbackPeriod, error)
 }
 
 func (f *fakeFeedbackPeriodRepo) Create(ctx context.Context, period *model.FeedbackPeriod) (*model.FeedbackPeriod, error) {
@@ -32,6 +33,32 @@ func (f *fakeFeedbackPeriodRepo) Create(ctx context.Context, period *model.Feedb
 	f.created = period
 	f.byID[period.ID] = period
 	return period, nil
+}
+
+func (f *fakeFeedbackPeriodRepo) GetByID(_ context.Context, id string) (*model.FeedbackPeriod, error) {
+	if f.byID == nil {
+		return nil, apperror.ErrFeedbackPeriodNotFound
+	}
+	if p, ok := f.byID[id]; ok {
+		return p, nil
+	}
+	return nil, apperror.ErrFeedbackPeriodNotFound
+}
+
+func (f *fakeFeedbackPeriodRepo) ListByOrganization(ctx context.Context, organizationName string) ([]*model.FeedbackPeriod, error) {
+	if f.listFn != nil {
+		return f.listFn(ctx, organizationName)
+	}
+	if f.byID == nil {
+		return []*model.FeedbackPeriod{}, nil
+	}
+	var out []*model.FeedbackPeriod
+	for _, p := range f.byID {
+		if p.OrganizationName == organizationName {
+			out = append(out, p)
+		}
+	}
+	return out, nil
 }
 
 // newFeedbackPeriodTestService builds a FeedbackPeriodService backed by a fake
@@ -189,4 +216,76 @@ func TestFeedbackPeriod_Create_ValidationErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFeedbackPeriod_ListByOrganization(t *testing.T) {
+	start1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end1 := time.Date(2026, 6, 30, 0, 0, 0, 0, time.UTC)
+	start2 := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	end2 := time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC)
+
+	t.Run("returns periods for the named organization", func(t *testing.T) {
+		svc, repo := newFeedbackPeriodTestService()
+		// Seed two periods for "Acme" and one for "Other".
+		acme1 := &model.FeedbackPeriod{ID: "p-1", Name: "H1", OrganizationName: "Acme", StartDate: start1, EndDate: end1}
+		acme2 := &model.FeedbackPeriod{ID: "p-2", Name: "H2", OrganizationName: "Acme", StartDate: start2, EndDate: end2}
+		other := &model.FeedbackPeriod{ID: "p-3", Name: "Other", OrganizationName: "Other", StartDate: start1, EndDate: end1}
+		repo.byID = map[string]*model.FeedbackPeriod{
+			acme1.ID: acme1, acme2.ID: acme2, other.ID: other,
+		}
+
+		got, err := svc.ListByOrganization(context.Background(), "Acme")
+		if err != nil {
+			t.Fatalf("ListByOrganization: unexpected error: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("got %d periods, want 2", len(got))
+		}
+		for _, p := range got {
+			if p.OrganizationName != "Acme" {
+				t.Fatalf("got period with org %q, want Acme", p.OrganizationName)
+			}
+		}
+	})
+
+	t.Run("empty organization returns an empty slice", func(t *testing.T) {
+		svc, _ := newFeedbackPeriodTestService()
+		got, err := svc.ListByOrganization(context.Background(), "NoSuchOrg")
+		if err != nil {
+			t.Fatalf("ListByOrganization: unexpected error: %v", err)
+		}
+		if got == nil {
+			t.Fatal("expected non-nil slice, got nil")
+		}
+		if len(got) != 0 {
+			t.Fatalf("got %d periods, want 0", len(got))
+		}
+	})
+
+	t.Run("missing organization_name is rejected", func(t *testing.T) {
+		svc, _ := newFeedbackPeriodTestService()
+		_, err := svc.ListByOrganization(context.Background(), "")
+		if err == nil {
+			t.Fatal("expected validation error, got nil")
+		}
+		if !apperror.IsInvalidFeedbackPeriod(err) {
+			t.Fatalf("expected ErrInvalidFeedbackPeriod, got %T: %v", err, err)
+		}
+		if err.Error() != "organization_name is required" {
+			t.Fatalf("expected organization_name is required, got %q", err.Error())
+		}
+	})
+
+	t.Run("repository error propagates", func(t *testing.T) {
+		repo := &fakeFeedbackPeriodRepo{
+			listFn: func(_ context.Context, _ string) ([]*model.FeedbackPeriod, error) {
+				return nil, errors.New("firestore unavailable")
+			},
+		}
+		svc := NewFeedbackPeriodService(repo, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		_, err := svc.ListByOrganization(context.Background(), "Acme")
+		if err == nil {
+			t.Fatal("expected repository error to propagate, got nil")
+		}
+	})
 }

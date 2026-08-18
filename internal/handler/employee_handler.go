@@ -3,7 +3,9 @@ package handler
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/labstack/echo/v5"
 
@@ -22,18 +24,23 @@ type EmployeeService interface {
 	Login(ctx context.Context, email, password string) (*model.Employee, error)
 	GetByID(ctx context.Context, id string) (*model.Employee, error)
 	VerifyEmail(ctx context.Context, token string) error
+	ListByOrganization(ctx context.Context, organizationName string, limit int, cursorID string) ([]*model.Employee, string, error)
 }
 
 // EmployeeHandler exposes HTTP endpoints for employee operations.
 type EmployeeHandler struct {
 	employees EmployeeService
 	tokens    *auth.TokenSigner
+	logger    *slog.Logger
 }
 
 // NewEmployeeHandler creates an EmployeeHandler backed by the given service
-// and token signer.
-func NewEmployeeHandler(employees EmployeeService, tokens *auth.TokenSigner) *EmployeeHandler {
-	return &EmployeeHandler{employees: employees, tokens: tokens}
+// and token signer. If logger is nil, slog.Default() is used.
+func NewEmployeeHandler(employees EmployeeService, tokens *auth.TokenSigner, logger *slog.Logger) *EmployeeHandler {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &EmployeeHandler{employees: employees, tokens: tokens, logger: logger}
 }
 
 // Register handles POST /v1/register: creates a new employee from the
@@ -138,4 +145,58 @@ func (h *EmployeeHandler) VerifyEmail(c *echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{"message": "email verified"})
+}
+
+// ListEmployees handles GET /v1/employees: returns one page of employees in
+// the authenticated caller's organization, ordered by name ascending. The
+// organization is taken from the JWT, so an employee can only see their own
+// organization's members. Any authenticated employee may list colleagues (they
+// need to see them to file feedback). The response omits the password field.
+//
+// Pagination is controlled by two optional query parameters:
+//   - limit:  page size, default 20, max 100. Non-numeric or <= 0 falls back to
+//     the default; values above the max are capped.
+//   - cursor: the ID of the last employee from the previous page (the
+//     next_cursor value the client received). Omit on the first page.
+//
+// The response includes next_cursor: the ID to pass as cursor on the next
+// request, or null when there are no more pages. An unknown cursor (one that
+// does not refer to an existing employee) returns 400.
+func (h *EmployeeHandler) ListEmployees(c *echo.Context) error {
+	claims := ClaimsFromContext(c)
+	if claims == nil {
+		// Auth middleware should have already rejected the request; this guard
+		// protects against accidental wiring without the middleware.
+		h.logger.Warn("employee list rejected: missing claims (route miswired?)")
+		return echo.NewHTTPError(http.StatusUnauthorized, "missing or invalid token")
+	}
+
+	limit := 0
+	if raw := c.QueryParam("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			limit = n
+		}
+	}
+	cursorID := c.QueryParam("cursor")
+
+	employees, nextCursorID, err := h.employees.ListByOrganization(c.Request().Context(), claims.OrganizationName, limit, cursorID)
+	if err != nil {
+		var invalid apperror.ErrInvalidEmployee
+		if errors.As(err, &invalid) {
+			h.logger.Warn("employee list rejected: validation failed",
+				"caller_id", claims.Subject, "organization_name", claims.OrganizationName, "reason", invalid.Error())
+			return echo.NewHTTPError(http.StatusBadRequest, invalid.Error())
+		}
+		if errors.Is(err, apperror.ErrEmployeeNotFound) {
+			// An unknown cursor: the cursor ID did not match a stored employee.
+			h.logger.Warn("employee list rejected: unknown cursor",
+				"caller_id", claims.Subject, "organization_name", claims.OrganizationName, "cursor", cursorID)
+			return echo.NewHTTPError(http.StatusBadRequest, "unknown cursor")
+		}
+		h.logger.Error("employee list failed",
+			"error", err, "caller_id", claims.Subject, "organization_name", claims.OrganizationName, "cursor", cursorID)
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to list employees")
+	}
+
+	return c.JSON(http.StatusOK, dto.ToEmployeeListResponse(employees, nextCursorID))
 }

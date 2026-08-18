@@ -10,8 +10,11 @@ are JSON; responses are JSON. The dev server listens on `http://localhost:1323`.
 | GET    | `/v1/verify-email`  | —              | Verify an email using the token from the verification email.  |
 | POST   | `/v1/login`         | —              | Authenticate and obtain a JWT.                                |
 | GET    | `/v1/me`            | Bearer token   | Get the authenticated employee's profile.                     |
+| GET    | `/v1/employees`     | Bearer token   | List the employees in the caller's organization.             |
 | POST   | `/v1/invitation`    | Bearer token¹  | Issue an invitation token (org admins only).                  |
-| POST   | `/v1/feedback-period` | Bearer token¹ | Open a feedback period for the caller's organization (org admins only). |
+| POST   | `/v1/feedback-periods` | Bearer token¹ | Open a feedback period for the caller's organization (org admins only). |
+| GET    | `/v1/feedback-periods` | Bearer token | List the feedback periods for the caller's organization.        |
+| POST   | `/v1/feedbacks`      | Bearer token   | File a feedback entry for a colleague.                        |
 
 ¹ The caller's JWT `role` claim must be `org_admin`; any other role gets `403`.
 
@@ -154,6 +157,70 @@ with `{"message":"employee not found"}`.
 
 ---
 
+## List Employees
+
+`GET /v1/employees` — returns one page of employees in the authenticated
+caller's organization, ordered by name ascending. Requires a valid `Bearer`
+JWT; any authenticated employee may list colleagues (an employee needs to see
+colleagues to file feedback against them). The organization is taken from the
+caller's JWT, so an employee can only see their own organization's members. The
+response omits the `password` field.
+
+Pagination is cursor-based and controlled by two optional query parameters:
+
+| Parameter | Default | Notes                                                                                  |
+|-----------|---------|----------------------------------------------------------------------------------------|
+| `limit`   | `20`    | Page size. Non-numeric or `<= 0` falls back to the default; values above `100` are capped. |
+| `cursor`  | —       | The `next_cursor` value from the previous page (an employee ID). Omit on the first page. An unknown cursor returns `400`. |
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X GET "http://localhost:1323/v1/employees?limit=20&cursor=0190bbbb-..." \
+  -H "Authorization: Bearer <access_token>"
+```
+
+Expected response: `HTTP 200`:
+
+```json
+{
+  "employees": [
+    {
+      "id": "0190aaaa-...",
+      "name": "Alice",
+      "organization_name": "Acme",
+      "role": "org_admin",
+      "manager_id": null,
+      "title": "Senior Engineer",
+      "email": "alice@example.com",
+      "is_mail_verified": true,
+      "created_at": "2026-08-18T10:00:00Z",
+      "updated_at": "2026-08-18T10:00:00Z"
+    }
+  ],
+  "next_cursor": "0190aaaa-..."
+}
+```
+
+`next_cursor` is the ID of the last employee on this page; pass it as `cursor`
+on the next request to fetch the following page. When there are no more pages
+`next_cursor` is `null`:
+
+```json
+{ "employees": [], "next_cursor": null }
+```
+
+An organization with no other members returns `HTTP 200` with
+`{"employees": [], "next_cursor": null}`. The caller is included in the list;
+the frontend should filter the caller out when populating a reviewee picker
+(the backend enforces no self-review at `POST /v1/feedbacks`).
+
+| Status | `message`                                       | When                                                          |
+|--------|-------------------------------------------------|---------------------------------------------------------------|
+| 400    | `"unknown cursor"`                              | `cursor` does not refer to an existing employee.              |
+| 401    | `"missing or invalid token"`                    | No/invalid `Authorization` header or bad token.               |
+| 500    | `"failed to list employees"`                    | Unexpected server error.                                      |
+
+---
+
 ## Create Invitation
 
 `POST /v1/invitation` — issues a signed invitation token that lets the bearer
@@ -202,14 +269,14 @@ to create the invitee's account with `role: "user"`.
 
 ## Create Feedback Period
 
-`POST /v1/feedback-period` — opens a feedback period for the authenticated
+`POST /v1/feedback-periods` — opens a feedback period for the authenticated
 employee's organization. Requires a valid `Bearer` JWT and the caller must have
 `role: "org_admin"`; any other role returns `403`. The `organization_name` is
 taken from the caller's JWT (not the body), so a client cannot open a period for
 an org they do not belong to.
 
 ```bash
-curl -s -w "\nHTTP %{http_code}\n" -X POST http://localhost:1323/v1/feedback-period \
+curl -s -w "\nHTTP %{http_code}\n" -X POST http://localhost:1323/v1/feedback-periods \
   -H "Authorization: Bearer <access_token>" \
   -H "Content-Type: application/json" \
   -d '{
@@ -246,3 +313,124 @@ Expected response: `HTTP 201`:
 | 401    | `"missing or invalid token"`                    | No/invalid `Authorization` header or bad token.               |
 | 403    | `"only org admins can create feedback periods"` | Caller's `role` is not `org_admin`.                           |
 | 500    | `"failed to create feedback period"`            | Unexpected server error.                                      |
+
+---
+
+## List Feedback Periods
+
+`GET /v1/feedback-periods` — returns the feedback periods for the authenticated
+employee's organization, ordered by start date descending (most recent first).
+Requires a valid `Bearer` JWT; any authenticated employee may list periods (an
+employee needs to see periods in order to file feedback against them). The
+organization is taken from the caller's JWT, so an employee can only see their
+own organization's periods.
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X GET http://localhost:1323/v1/feedback-periods \
+  -H "Authorization: Bearer <access_token>"
+```
+
+Expected response: `HTTP 200`:
+
+```json
+{
+  "periods": [
+    {
+      "id": "0190abcd-...",
+      "name": "H2 2026",
+      "organization_name": "Acme",
+      "start_date": "2026-07-01T00:00:00Z",
+      "end_date": "2026-12-31T23:59:59Z",
+      "created_at": "2026-08-18T10:00:00Z",
+      "updated_at": "2026-08-18T10:00:00Z"
+    },
+    {
+      "id": "0190abce-...",
+      "name": "H1 2026",
+      "organization_name": "Acme",
+      "start_date": "2026-01-01T00:00:00Z",
+      "end_date": "2026-06-30T23:59:59Z",
+      "created_at": "2026-02-01T10:00:00Z",
+      "updated_at": "2026-02-01T10:00:00Z"
+    }
+  ]
+}
+```
+
+An organization with no periods yet returns `HTTP 200` with `{"periods": []}`.
+
+| Status | `message`                                       | When                                                          |
+|--------|-------------------------------------------------|---------------------------------------------------------------|
+| 401    | `"missing or invalid token"`                    | No/invalid `Authorization` header or bad token.               |
+| 500    | `"failed to list feedback periods"`             | Unexpected server error.                                      |
+
+---
+
+## Create Feedback
+
+`POST /v1/feedbacks` — files a feedback entry for a colleague. Requires a valid
+`Bearer` JWT; any authenticated employee may file feedback. The reviewer is the
+authenticated employee (taken from the JWT subject), so `reviewer_id` in the body
+is ignored. A reviewer cannot review themselves.
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X POST http://localhost:1323/v1/feedbacks \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "period_id": "0190abcd-...",
+    "reviewee_id": "<colleague employee id>",
+    "communication_score": 4,
+    "leadership_score": 5,
+    "technical_score": 3,
+    "collaboration_score": 4,
+    "delivery_score": 5,
+    "trust_score": 2,
+    "strengths_comment": "great teammate",
+    "weaknesses_comment": "could document more",
+    "visibility": "private"
+  }'
+```
+
+| Field                | Required | Notes                                                                                  |
+|----------------------|----------|----------------------------------------------------------------------------------------|
+| `period_id`          | yes      | Trimmed; must not be empty.                                                            |
+| `reviewee_id`        | yes      | Trimmed; must not be empty. Must differ from the reviewer (no self-review).            |
+| `communication_score`| yes      | Integer 1–5.                                                                          |
+| `leadership_score`   | yes      | Integer 1–5.                                                                            |
+| `technical_score`    | yes      | Integer 1–5.                                                                            |
+| `collaboration_score`| yes      | Integer 1–5.                                                                           |
+| `delivery_score`     | yes      | Integer 1–5.                                                                            |
+| `trust_score`        | yes      | Integer 1–5.                                                                            |
+| `strengths_comment`  | no       | Free text. Defaults to `""`.                                                           |
+| `weaknesses_comment` | no       | Free text. Defaults to `""`.                                                           |
+| `visibility`         | no       | One of `"public"`, `"private"`, `"manager_only"`. Defaults to `"private"` when omitted or empty. |
+
+Expected response: `HTTP 201`:
+
+```json
+{
+  "id": "0190abcd-...",
+  "period_id": "0190abcd-...",
+  "reviewee_id": "<colleague employee id>",
+  "reviewer_id": "<authenticated employee id>",
+  "communication_score": 4,
+  "leadership_score": 5,
+  "technical_score": 3,
+  "collaboration_score": 4,
+  "delivery_score": 5,
+  "trust_score": 2,
+  "strengths_comment": "great teammate",
+  "weaknesses_comment": "could document more",
+  "visibility": "private",
+  "created_at": "2026-08-18T10:00:00Z",
+  "updated_at": "2026-08-18T10:00:00Z"
+}
+```
+
+| Status | `message`                                       | When                                                          |
+|--------|-------------------------------------------------|---------------------------------------------------------------|
+| 400    | `"invalid request body"`                        | Malformed/non-JSON body.                                      |
+| 400    | `"<validation message>"`                        | Missing `period_id`/`reviewee_id`, self-review, a score outside 1–5, or an unknown `visibility`. |
+| 401    | `"missing or invalid token"`                    | No/invalid `Authorization` header or bad token.               |
+| 500    | `"failed to create feedback"`                   | Unexpected server error.                                      |

@@ -31,6 +31,7 @@ type EmployeeRepository interface {
 	GetByEmail(ctx context.Context, email string) (*model.Employee, error)
 	GetByID(ctx context.Context, id string) (*model.Employee, error)
 	Update(ctx context.Context, employee *model.Employee) (*model.Employee, error)
+	ListByOrganization(ctx context.Context, organizationName string, limit int, cursorID string) ([]*model.Employee, string, error)
 }
 
 // EmployeeService is the application layer that orchestrates employee
@@ -166,6 +167,47 @@ func (s *EmployeeService) Login(ctx context.Context, email, password string) (*m
 // apperror.ErrEmployeeNotFound when no employee matches.
 func (s *EmployeeService) GetByID(ctx context.Context, id string) (*model.Employee, error) {
 	return s.repo.GetByID(ctx, id)
+}
+
+// DefaultEmployeeListLimit is the page size used when the caller does not
+// specify a limit. It is sized for a reviewee picker, which typically renders
+// one screen of options before the user scrolls or searches.
+const DefaultEmployeeListLimit = 20
+
+// MaxEmployeeListLimit caps the page size a caller can request. It protects
+// the database from a single request pulling the entire organization into
+// memory; a client that needs more pages can follow next_cursor.
+const MaxEmployeeListLimit = 100
+
+// ListByOrganization returns one page of employees in the named organization,
+// ordered by name ascending, plus the ID of the last employee on the page for
+// use as the next page's cursor. The organization name is taken from the
+// authenticated caller's JWT by the handler, so an employee can only see their
+// own organization's members.
+//
+// limit is the page size; if <= 0 DefaultEmployeeListLimit is used, and it is
+// capped at MaxEmployeeListLimit. cursorID is the ID of the last employee from
+// the previous page (the next_cursor value the client received); an empty
+// cursorID starts a new listing from the beginning. The returned nextCursorID
+// is empty when there are no more pages.
+func (s *EmployeeService) ListByOrganization(ctx context.Context, organizationName string, limit int, cursorID string) ([]*model.Employee, string, error) {
+	if strings.TrimSpace(organizationName) == "" {
+		s.logger.Warn("employee list rejected: missing organization_name")
+		return nil, "", apperror.ErrInvalidEmployee("organization_name is required")
+	}
+	if limit <= 0 {
+		limit = DefaultEmployeeListLimit
+	}
+	if limit > MaxEmployeeListLimit {
+		limit = MaxEmployeeListLimit
+	}
+
+	employees, nextCursorID, err := s.repo.ListByOrganization(ctx, organizationName, limit, cursorID)
+	if err != nil {
+		s.logger.Error("employee list failed", "error", err, "organization_name", organizationName, "limit", limit, "cursor_id", cursorID)
+		return nil, "", err
+	}
+	return employees, nextCursorID, nil
 }
 
 // SendVerification issues an email-verification token for the given employee

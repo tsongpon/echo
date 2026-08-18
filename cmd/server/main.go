@@ -75,12 +75,15 @@ func main() {
 		fatal("failed to create invitation token signer", "error", err)
 	}
 	employeeService := service.NewEmployeeService(employeeRepo, buildMailer(), verifySigner, invitationSigner, nil)
-	employeeHandler := handler.NewEmployeeHandler(employeeService, tokenSigner)
+	employeeHandler := handler.NewEmployeeHandler(employeeService, tokenSigner, nil)
 	invitationService := service.NewInvitationService(invitationSigner, nil)
 	invitationHandler := handler.NewInvitationHandler(invitationService)
 	feedbackPeriodRepo := repository.NewFeedbackPeriodFirestoreRepository(firestoreClient, nil)
 	feedbackPeriodService := service.NewFeedbackPeriodService(feedbackPeriodRepo, nil)
-	feedbackPeriodHandler := handler.NewFeedbackPeriodHandler(feedbackPeriodService)
+	feedbackPeriodHandler := handler.NewFeedbackPeriodHandler(feedbackPeriodService, nil)
+	feedbackRepo := repository.NewFeedbackFirestoreRepository(firestoreClient, nil)
+	feedbackService := service.NewFeedbackService(feedbackRepo, feedbackPeriodRepo, nil)
+	feedbackHandler := handler.NewFeedbackHandler(feedbackService, nil)
 
 	e.GET("/ping", func(c *echo.Context) error {
 		return c.String(http.StatusOK, "pong")
@@ -89,8 +92,11 @@ func main() {
 	e.POST("/v1/login", employeeHandler.Login)
 	e.GET("/v1/verify-email", employeeHandler.VerifyEmail)
 	e.GET("/v1/me", employeeHandler.Me, handler.Auth(tokenSigner))
+	e.GET("/v1/employees", employeeHandler.ListEmployees, handler.Auth(tokenSigner))
 	e.POST("/v1/invitation", invitationHandler.CreateInvitation, handler.Auth(tokenSigner))
-	e.POST("/v1/feedback-period", feedbackPeriodHandler.CreateFeedbackPeriod, handler.Auth(tokenSigner))
+	e.POST("/v1/feedback-periods", feedbackPeriodHandler.CreateFeedbackPeriod, handler.Auth(tokenSigner))
+	e.GET("/v1/feedback-periods", feedbackPeriodHandler.ListFeedbackPeriods, handler.Auth(tokenSigner))
+	e.POST("/v1/feedbacks", feedbackHandler.CreateFeedback, handler.Auth(tokenSigner))
 
 	if err := e.Start(":" + port); err != nil {
 		slog.Error("failed to start server", "error", err)
