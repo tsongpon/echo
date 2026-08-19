@@ -84,7 +84,7 @@ func TestCreateFeedback_Handler(t *testing.T) {
 		c.Set(contextKeyUser, claims)
 	}
 
-	const validBody = `{"period_id":"period-1","reviewee_id":"emp-2","communication_score":4,"leadership_score":5,"technical_score":3,"collaboration_score":4,"delivery_score":5,"trust_score":2,"strengths_comment":"great","weaknesses_comment":"docs","visibility":"private"}`
+	const validBody = `{"period_id":"period-1","reviewee_id":"emp-2","communication_score":4,"leadership_score":5,"technical_score":3,"collaboration_score":4,"delivery_score":5,"trust_score":2,"strengths_comment":"great","weaknesses_comment":"docs","visibility":"anonymous"}`
 
 	cases := []struct {
 		name        string

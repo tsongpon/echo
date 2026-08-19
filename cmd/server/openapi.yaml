@@ -435,8 +435,8 @@ paths:
             period (the service validates it before persisting).
           * `reviewee_id` is required and must differ from the reviewer.
           * Each of the six score fields must be an integer in [1, 5].
-          * `visibility` defaults to `"private"` when omitted or empty, and
-            must otherwise be one of `public`, `private`, `manager_only`.
+          * `visibility` defaults to `"anonymous"` when omitted or empty, and
+            must otherwise be one of `anonymous`, `named`.
       operationId: createFeedback
       security:
         - BearerAuth: []
@@ -459,7 +459,7 @@ paths:
                   trust_score: 2
                   strengths_comment: great teammate
                   weaknesses_comment: could document more
-                  visibility: private
+                  visibility: anonymous
       responses:
         "201":
           description: The created feedback entry.
@@ -579,13 +579,12 @@ components:
 
     FeedbackVisibility:
       type: string
-      description: Who may see a feedback entry.
+      description: Whether the reviewer's identity is attributed on a feedback entry.
       enum:
-        - public
-        - private
-        - manager_only
+        - anonymous
+        - named
       examples:
-        - private
+        - anonymous
 
     Score:
       type: integer
@@ -893,13 +892,15 @@ components:
           $ref: "#/components/schemas/Score"
         strengths_comment:
           type: string
-          default: ""
+          minLength: 1
+          description: Required; must not be empty after trim.
         weaknesses_comment:
           type: string
-          default: ""
+          minLength: 1
+          description: Required; must not be empty after trim.
         visibility:
           $ref: "#/components/schemas/FeedbackVisibility"
-          description: Defaults to `private` when omitted or empty.
+          description: Defaults to `anonymous` when omitted or empty.
       required:
         - period_id
         - reviewee_id
@@ -909,6 +910,8 @@ components:
         - collaboration_score
         - delivery_score
         - trust_score
+        - strengths_comment
+        - weaknesses_comment
 
     FeedbackResponse:
       type: object

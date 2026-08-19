@@ -31,9 +31,11 @@ const (
 type FeedbackVisibility string
 
 const (
-	FeedbackVisibilityPublic      FeedbackVisibility = "public"
-	FeedbackVisibilityPrivate     FeedbackVisibility = "private"
-	FeedbackVisibilityManagerOnly FeedbackVisibility = "manager_only"
+	// FeedbackVisibilityAnonymous hides the reviewer's identity from the
+	// reviewee. This is the default when no visibility is supplied.
+	FeedbackVisibilityAnonymous FeedbackVisibility = "anonymous"
+	// FeedbackVisibilityNamed attributes the feedback to its reviewer.
+	FeedbackVisibilityNamed FeedbackVisibility = "named"
 )
 
 type Feedback struct {

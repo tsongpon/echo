@@ -68,7 +68,7 @@ func validFeedbackInput() *model.Feedback {
 		TrustScore:         2,
 		StrengthsComment:   "great teammate",
 		WeaknessesComment:  "could document more",
-		Visibility:         model.FeedbackVisibilityPrivate,
+		Visibility:         model.FeedbackVisibilityAnonymous,
 	}
 }
 
@@ -119,7 +119,7 @@ func TestFeedback_Create(t *testing.T) {
 		}
 	})
 
-	t.Run("empty visibility defaults to private", func(t *testing.T) {
+	t.Run("empty visibility defaults to anonymous", func(t *testing.T) {
 		svc, repo, _ := newFeedbackTestService()
 		feedback := validFeedbackInput()
 		feedback.Visibility = ""
@@ -128,36 +128,36 @@ func TestFeedback_Create(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Create: unexpected error: %v", err)
 		}
-		if repo.created.Visibility != model.FeedbackVisibilityPrivate {
-			t.Fatalf("got visibility %q, want private", repo.created.Visibility)
+		if repo.created.Visibility != model.FeedbackVisibilityAnonymous {
+			t.Fatalf("got visibility %q, want anonymous", repo.created.Visibility)
 		}
 	})
 
-	t.Run("visibility public honored", func(t *testing.T) {
+	t.Run("visibility anonymous honored", func(t *testing.T) {
 		svc, repo, _ := newFeedbackTestService()
 		feedback := validFeedbackInput()
-		feedback.Visibility = model.FeedbackVisibilityPublic
+		feedback.Visibility = model.FeedbackVisibilityAnonymous
 
 		_, err := svc.Create(context.Background(), "reviewer-1", feedback)
 		if err != nil {
 			t.Fatalf("Create: unexpected error: %v", err)
 		}
-		if repo.created.Visibility != model.FeedbackVisibilityPublic {
-			t.Fatalf("got visibility %q, want public", repo.created.Visibility)
+		if repo.created.Visibility != model.FeedbackVisibilityAnonymous {
+			t.Fatalf("got visibility %q, want anonymous", repo.created.Visibility)
 		}
 	})
 
-	t.Run("visibility manager_only honored", func(t *testing.T) {
+	t.Run("visibility named honored", func(t *testing.T) {
 		svc, repo, _ := newFeedbackTestService()
 		feedback := validFeedbackInput()
-		feedback.Visibility = model.FeedbackVisibilityManagerOnly
+		feedback.Visibility = model.FeedbackVisibilityNamed
 
 		_, err := svc.Create(context.Background(), "reviewer-1", feedback)
 		if err != nil {
 			t.Fatalf("Create: unexpected error: %v", err)
 		}
-		if repo.created.Visibility != model.FeedbackVisibilityManagerOnly {
-			t.Fatalf("got visibility %q, want manager_only", repo.created.Visibility)
+		if repo.created.Visibility != model.FeedbackVisibilityNamed {
+			t.Fatalf("got visibility %q, want named", repo.created.Visibility)
 		}
 	})
 
@@ -305,6 +305,26 @@ func TestFeedback_Create_ValidationErrors(t *testing.T) {
 			wantMsg:    "trust_score must be between 1 and 5",
 		},
 		{
+			name:       "missing strengths_comment",
+			reviewerID: "reviewer-1",
+			feedback: func() *model.Feedback {
+				f := validFeedbackInput()
+				f.StrengthsComment = "  "
+				return f
+			}(),
+			wantMsg: "strengths_comment is required",
+		},
+		{
+			name:       "missing weaknesses_comment",
+			reviewerID: "reviewer-1",
+			feedback: func() *model.Feedback {
+				f := validFeedbackInput()
+				f.WeaknessesComment = ""
+				return f
+			}(),
+			wantMsg: "weaknesses_comment is required",
+		},
+		{
 			name:       "invalid visibility value",
 			reviewerID: "reviewer-1",
 			feedback: func() *model.Feedback {
@@ -312,7 +332,7 @@ func TestFeedback_Create_ValidationErrors(t *testing.T) {
 				f.Visibility = "secret"
 				return f
 			}(),
-			wantMsg: "visibility must be one of public, private, manager_only",
+			wantMsg: "visibility must be one of anonymous, named",
 		},
 	}
 

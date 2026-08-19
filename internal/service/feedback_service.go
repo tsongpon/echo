@@ -72,7 +72,9 @@ func NewFeedbackService(repo FeedbackRepository, periods FeedbackPeriodLookup, l
 //   - reviewer_id is required (non-empty after trim).
 //   - reviewee_id must differ from reviewer_id (no self-review).
 //   - each of the six score fields must be in [minScore, maxScore].
-//   - visibility defaults to private when empty, and must otherwise be one of
+//   - strengths_comment is required (non-empty after trim).
+//   - weaknesses_comment is required (non-empty after trim).
+//   - visibility defaults to anonymous when empty, and must otherwise be one of
 //     the defined model.FeedbackVisibility constants.
 func (s *FeedbackService) Create(ctx context.Context, reviewerID string, feedback *model.Feedback) (*model.Feedback, error) {
 	if feedback == nil {
@@ -137,10 +139,20 @@ func (s *FeedbackService) Create(ctx context.Context, reviewerID string, feedbac
 			"reviewer_id", reviewerID, "period_id", feedback.PeriodID, "score", feedback.TrustScore)
 		return nil, err
 	}
+	if strings.TrimSpace(feedback.StrengthsComment) == "" {
+		s.logger.Warn("feedback create rejected: missing strengths_comment",
+			"reviewer_id", reviewerID, "period_id", feedback.PeriodID)
+		return nil, apperror.ErrInvalidFeedback("strengths_comment is required")
+	}
+	if strings.TrimSpace(feedback.WeaknessesComment) == "" {
+		s.logger.Warn("feedback create rejected: missing weaknesses_comment",
+			"reviewer_id", reviewerID, "period_id", feedback.PeriodID)
+		return nil, apperror.ErrInvalidFeedback("weaknesses_comment is required")
+	}
 	if feedback.Visibility != "" && !validVisibility(feedback.Visibility) {
 		s.logger.Warn("feedback create rejected: invalid visibility",
 			"reviewer_id", reviewerID, "period_id", feedback.PeriodID, "visibility", string(feedback.Visibility))
-		return nil, apperror.ErrInvalidFeedback("visibility must be one of public, private, manager_only")
+		return nil, apperror.ErrInvalidFeedback("visibility must be one of anonymous, named")
 	}
 	feedback.Visibility = normalizeVisibility(feedback.Visibility)
 
@@ -170,12 +182,12 @@ func validateScore(field string, score int) error {
 	return nil
 }
 
-// normalizeVisibility defaults an empty visibility to private and otherwise
+// normalizeVisibility defaults an empty visibility to anonymous and otherwise
 // leaves a valid value untouched. It does not reject unknown values: that is
 // the caller's responsibility via validVisibility below.
 func normalizeVisibility(v model.FeedbackVisibility) model.FeedbackVisibility {
 	if v == "" {
-		return model.FeedbackVisibilityPrivate
+		return model.FeedbackVisibilityAnonymous
 	}
 	return v
 }
@@ -184,7 +196,7 @@ func normalizeVisibility(v model.FeedbackVisibility) model.FeedbackVisibility {
 // model.FeedbackVisibility constants.
 func validVisibility(v model.FeedbackVisibility) bool {
 	switch v {
-	case model.FeedbackVisibilityPublic, model.FeedbackVisibilityPrivate, model.FeedbackVisibilityManagerOnly:
+	case model.FeedbackVisibilityAnonymous, model.FeedbackVisibilityNamed:
 		return true
 	default:
 		return false

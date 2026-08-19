@@ -425,7 +425,7 @@ curl -s -w "\nHTTP %{http_code}\n" -X POST http://localhost:1323/v1/feedbacks \
     "trust_score": 2,
     "strengths_comment": "great teammate",
     "weaknesses_comment": "could document more",
-    "visibility": "private"
+    "visibility": "anonymous"
   }'
 ```
 
@@ -439,9 +439,9 @@ curl -s -w "\nHTTP %{http_code}\n" -X POST http://localhost:1323/v1/feedbacks \
 | `collaboration_score`| yes      | Integer 1–5.                                                                           |
 | `delivery_score`     | yes      | Integer 1–5.                                                                            |
 | `trust_score`        | yes      | Integer 1–5.                                                                            |
-| `strengths_comment`  | no       | Free text. Defaults to `""`.                                                           |
-| `weaknesses_comment` | no       | Free text. Defaults to `""`.                                                           |
-| `visibility`         | no       | One of `"public"`, `"private"`, `"manager_only"`. Defaults to `"private"` when omitted or empty. |
+| `strengths_comment`  | yes      | Free text; must not be empty.                                                          |
+| `weaknesses_comment` | yes      | Free text; must not be empty.                                                         |
+| `visibility`         | no       | One of `"anonymous"`, `"named"`. Defaults to `"anonymous"` when omitted or empty. |
 
 Expected response: `HTTP 201`:
 
@@ -459,7 +459,7 @@ Expected response: `HTTP 201`:
   "trust_score": 2,
   "strengths_comment": "great teammate",
   "weaknesses_comment": "could document more",
-  "visibility": "private",
+  "visibility": "anonymous",
   "created_at": "2026-08-18T10:00:00Z",
   "updated_at": "2026-08-18T10:00:00Z"
 }
