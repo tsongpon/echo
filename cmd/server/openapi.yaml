@@ -1031,7 +1031,7 @@ components:
           type: array
           description: The feedback entries on this page, ordered by created_at descending. Never null (empty array when the caller has received no feedback).
           items:
-            $ref: "#/components/schemas/FeedbackResponse"
+            $ref: "#/components/schemas/FeedbackListItemResponse"
         next_cursor:
           type: string
           format: uuid
@@ -1045,7 +1045,7 @@ components:
           - id: 0190abcd-0000-7000-8000-000000000000
             period_id: 0190abca-0000-7000-8000-000000000000
             reviewee_id: 0190aaaa-0000-7000-8000-000000000000
-            reviewer_id: ""
+            reviewer_id: 0190bbbb-0000-7000-8000-000000000000
             communication_score: 4
             leadership_score: 5
             technical_score: 3
@@ -1054,7 +1054,24 @@ components:
             trust_score: 2
             strengths_comment: great teammate
             weaknesses_comment: could document more
-            visibility: anonymous
+            visibility: named
             created_at: "2026-08-18T10:00:00Z"
             updated_at: "2026-08-18T10:00:00Z"
         next_cursor: 0190abcd-0000-7000-8000-000000000000
+
+    # FeedbackListItemResponse is FeedbackResponse but with reviewer_id as a
+    # plain string (no uuid format) so it may be empty for anonymous entries,
+    # which the list endpoint redacts. Reuses every other field/requirement via
+    # allOf so it stays in sync with FeedbackResponse.
+    FeedbackListItemResponse:
+      allOf:
+        - $ref: "#/components/schemas/FeedbackResponse"
+        - type: object
+          properties:
+            reviewer_id:
+              type: string
+              description: |
+                The employee who filed the feedback. Empty for entries with
+                visibility: "anonymous" (the reviewer's identity is hidden from
+                the reviewee). A UUID for visibility: "named" entries.
+          required: [reviewer_id]

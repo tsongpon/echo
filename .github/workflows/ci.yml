@@ -42,15 +42,27 @@ jobs:
           node-version: "20"
 
       # Spectral validates the OpenAPI document is well-formed and follows
-      # the OAS 3.1 ruleset. Caches the npm install across runs.
+      # the OAS ruleset. Two things changed here from the original setup:
+      #
+      # 1. The CLI version is pinned. A floating `npm install -g
+      #    @stoplight/spectral-cli` pulled v6, which removed the built-in
+      #    `spectral:oas` ruleset shorthand: v6 interprets `-r spectral:oas`
+      #    as a file path and fails with "Could not read ruleset at
+      #    .../spectral:oas". Bump the pin deliberately and re-verify locally
+      #    before merging.
+      #
+      # 2. The `-r spectral:oas` flag is dropped. The OAS ruleset is instead
+      #    resolved via the `.spectral.yaml` at the repo root, which Spectral
+      #    auto-discovers. That file `extends: ["spectral:oas"]`, which v6
+      #    resolves through its bundled @stoplight/spectral-rulesets package.
       - name: Cache Spectral install
         uses: actions/cache@v4
         with:
           path: ~/.npm
-          key: spectral-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: spectral-${{ runner.os }}-6.16.3
 
       - name: Install Spectral
-        run: npm install -g @stoplight/spectral-cli
+        run: npm install -g @stoplight/spectral-cli@6.16.3
 
       - name: Lint OpenAPI spec
-        run: spectral lint -r spectral:oas cmd/server/openapi.yaml
+        run: spectral lint cmd/server/openapi.yaml
