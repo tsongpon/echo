@@ -95,3 +95,40 @@ func ToFeedbackResponse(f *model.Feedback) FeedbackResponse {
 		UpdatedAt:          f.UpdatedAt,
 	}
 }
+
+// FeedbackListResponse is the paginated wrapper returned by
+// GET /v1/me/feedbacks. The feedbacks slice is never nil: an employee who has
+// received no feedback yet yields { "feedbacks": [] }.
+type FeedbackListResponse struct {
+	Feedbacks  []FeedbackResponse `json:"feedbacks"`
+	NextCursor *string            `json:"next_cursor"`
+}
+
+// ToFeedbackListResponse maps a slice of domain Feedback to the list response
+// shape, ensuring a non-nil slice so the JSON encodes as []. nextCursorID is
+// the ID of the last feedback on the page; pass "" when there is no next page
+// so NextCursor serializes as null.
+//
+// Visibility policy: when an entry's visibility is anonymous, the reviewer's
+// identity is hidden from the reviewee (who is the caller of this endpoint).
+// The ReviewerID field is blanked for such entries before serialization. Named
+// entries keep ReviewerID intact. This redaction is applied only here, not in
+// ToFeedbackResponse, so the create endpoint still returns the reviewer's own
+// ID to the reviewer themselves (the reviewer is allowed to know they wrote
+// it).
+func ToFeedbackListResponse(feedbacks []*model.Feedback, nextCursorID string) FeedbackListResponse {
+	out := make([]FeedbackResponse, 0, len(feedbacks))
+	for _, f := range feedbacks {
+		resp := ToFeedbackResponse(f)
+		if f != nil && f.Visibility == model.FeedbackVisibilityAnonymous {
+			resp.ReviewerID = ""
+		}
+		out = append(out, resp)
+	}
+	var cursor *string
+	if nextCursorID != "" {
+		c := nextCursorID
+		cursor = &c
+	}
+	return FeedbackListResponse{Feedbacks: out, NextCursor: cursor}
+}

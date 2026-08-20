@@ -28,6 +28,7 @@ const (
 // implicitly.
 type FeedbackRepository interface {
 	Create(ctx context.Context, feedback *model.Feedback) (*model.Feedback, error)
+	ListByReviewee(ctx context.Context, revieweeID string, limit int, cursorID string) ([]*model.Feedback, string, error)
 }
 
 // FeedbackPeriodLookup is the consumer-defined contract for resolving a feedback
@@ -201,4 +202,54 @@ func validVisibility(v model.FeedbackVisibility) bool {
 	default:
 		return false
 	}
+}
+
+// DefaultFeedbackListLimit is the page size used when the caller does not
+// specify a limit for ListByReviewee. It mirrors the employee list default so
+// the API has a consistent page size across list endpoints.
+const DefaultFeedbackListLimit = 20
+
+// MaxFeedbackListLimit caps the page size a caller can request for
+// ListByReviewee. It protects the database from a single request pulling an
+// entire reviewee's feedback history into memory; a client that needs more
+// pages can follow next_cursor.
+const MaxFeedbackListLimit = 100
+
+// ListByReviewee returns one page of feedback entries received by the named
+// reviewee (i.e. entries whose reviewee_id matches), ordered by created_at
+// descending (newest first), plus the ID of the last entry on the page for use
+// as the next page's cursor. The reviewee ID is taken from the authenticated
+// caller's JWT by the handler, so an employee can only list their own received
+// feedback.
+//
+// limit is the page size; if <= 0 DefaultFeedbackListLimit is used, and it is
+// capped at MaxFeedbackListLimit. cursorID is the ID of the last feedback
+// entry from the previous page (the next_cursor value the client received);
+// an empty cursorID starts a new listing from the beginning. An unknown cursor
+// (one that does not refer to an existing feedback entry) propagates as
+// apperror.ErrFeedbackNotFound so the handler can map it to a 400. The returned
+// nextCursorID is empty when there are no more pages.
+func (s *FeedbackService) ListByReviewee(ctx context.Context, revieweeID string, limit int, cursorID string) ([]*model.Feedback, string, error) {
+	if strings.TrimSpace(revieweeID) == "" {
+		s.logger.Warn("feedback list rejected: missing reviewee_id")
+		return nil, "", apperror.ErrInvalidFeedback("reviewee_id is required")
+	}
+	if limit <= 0 {
+		limit = DefaultFeedbackListLimit
+	}
+	if limit > MaxFeedbackListLimit {
+		limit = MaxFeedbackListLimit
+	}
+
+	feedbacks, nextCursorID, err := s.repo.ListByReviewee(ctx, revieweeID, limit, cursorID)
+	if err != nil {
+		if errors.Is(err, apperror.ErrFeedbackNotFound) {
+			// An unknown cursor is a caller error, not a service failure.
+			// Pass it through so the handler can map it to a 400.
+			return nil, "", err
+		}
+		s.logger.Error("feedback list failed", "error", err, "reviewee_id", revieweeID, "limit", limit, "cursor_id", cursorID)
+		return nil, "", err
+	}
+	return feedbacks, nextCursorID, nil
 }

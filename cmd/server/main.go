@@ -138,6 +138,7 @@ func main() {
 	e.POST("/v1/feedback-periods", feedbackPeriodHandler.CreateFeedbackPeriod, handler.Auth(tokenSigner))
 	e.GET("/v1/feedback-periods", feedbackPeriodHandler.ListFeedbackPeriods, handler.Auth(tokenSigner))
 	e.POST("/v1/feedbacks", feedbackHandler.CreateFeedback, handler.Auth(tokenSigner))
+	e.GET("/v1/me/feedbacks", feedbackHandler.ListMyFeedbacks, handler.Auth(tokenSigner))
 
 	if err := e.Start(":" + port); err != nil {
 		slog.Error("failed to start server", "error", err)

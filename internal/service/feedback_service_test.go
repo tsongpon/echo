@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/tsongpon/echo/internal/apperror"
 	"github.com/tsongpon/echo/internal/model"
@@ -15,8 +17,10 @@ import (
 // records the feedback passed to Create without going through the real
 // repository package (which would create an import cycle).
 type fakeFeedbackRepo struct {
-	created  *model.Feedback
-	createFn func(ctx context.Context, feedback *model.Feedback) (*model.Feedback, error)
+	created        *model.Feedback
+	createFn       func(ctx context.Context, feedback *model.Feedback) (*model.Feedback, error)
+	listByReviewee func(ctx context.Context, revieweeID string, limit int, cursorID string) ([]*model.Feedback, string, error)
+	byReviewee     map[string][]*model.Feedback
 }
 
 func (f *fakeFeedbackRepo) Create(ctx context.Context, feedback *model.Feedback) (*model.Feedback, error) {
@@ -25,6 +29,50 @@ func (f *fakeFeedbackRepo) Create(ctx context.Context, feedback *model.Feedback)
 	}
 	f.created = feedback
 	return feedback, nil
+}
+
+// ListByReviewee mirrors service.FeedbackRepository.ListByReviewee. When
+// listByReviewee is nil it serves from an in-memory slice (set via byReviewee
+// below) so tests can exercise the happy path and pagination without writing a
+// custom function each time. Unknown cursor IDs return
+// apperror.ErrFeedbackNotFound, matching the real Firestore repository.
+func (f *fakeFeedbackRepo) ListByReviewee(_ context.Context, revieweeID string, limit int, cursorID string) ([]*model.Feedback, string, error) {
+	if f.listByReviewee != nil {
+		return f.listByReviewee(context.Background(), revieweeID, limit, cursorID)
+	}
+	all := f.byReviewee[revieweeID]
+	// Find the cursor position; an unknown cursor mirrors the repo's
+	// apperror.ErrFeedbackNotFound so the service test can exercise that path.
+	start := 0
+	if strings.TrimSpace(cursorID) != "" {
+		found := -1
+		for i, fb := range all {
+			if fb.ID == cursorID {
+				found = i
+				break
+			}
+		}
+		if found == -1 {
+			return nil, "", apperror.ErrFeedbackNotFound
+		}
+		start = found + 1
+	}
+	if limit <= 0 {
+		limit = DefaultFeedbackListLimit
+	}
+	end := start + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	page := all[start:end]
+	if page == nil {
+		page = []*model.Feedback{}
+	}
+	nextCursor := ""
+	if end < len(all) {
+		nextCursor = page[len(page)-1].ID
+	}
+	return page, nextCursor, nil
 }
 
 // fakePeriodLookup is an in-test stand-in for service.FeedbackPeriodLookup.
@@ -351,4 +399,223 @@ func TestFeedback_Create_ValidationErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFeedback_ListByReviewee(t *testing.T) {
+	// buildFeedbacks returns n feedback entries with stable IDs fb-1..fb-n and
+	// strictly increasing created_at, so the service's created_at-desc ordering
+	// is the reverse of insertion. The cursor semantics below rely on this.
+	buildFeedbacks := func(n int) []*model.Feedback {
+		out := make([]*model.Feedback, 0, n)
+		for i := 1; i <= n; i++ {
+			out = append(out, &model.Feedback{
+				ID:        "fb-" + itoa(i),
+				RevieweeID: "reviewee-1",
+				PeriodID:  "period-1",
+				CreatedAt: time.Unix(int64(i), 0).UTC(),
+			})
+		}
+		return out
+	}
+
+	t.Run("success returns feedback for the given reviewee", func(t *testing.T) {
+		repo := &fakeFeedbackRepo{
+			byReviewee: map[string][]*model.Feedback{
+				"reviewee-1": buildFeedbacks(2),
+			},
+		}
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		got, nextCursor, err := svc.ListByReviewee(context.Background(), "reviewee-1", 0, "")
+		if err != nil {
+			t.Fatalf("ListByReviewee: unexpected error: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("got %d feedbacks, want 2", len(got))
+		}
+		if nextCursor != "" {
+			t.Fatalf("expected empty nextCursor, got %q", nextCursor)
+		}
+	})
+
+	t.Run("passes reviewee id, limit, and cursor to the repository", func(t *testing.T) {
+		var gotRevieweeID string
+		var gotLimit int
+		var gotCursor string
+		repo := &fakeFeedbackRepo{
+			listByReviewee: func(_ context.Context, revieweeID string, limit int, cursorID string) ([]*model.Feedback, string, error) {
+				gotRevieweeID = revieweeID
+				gotLimit = limit
+				gotCursor = cursorID
+				return []*model.Feedback{}, "", nil
+			},
+		}
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		if _, _, err := svc.ListByReviewee(context.Background(), "reviewee-1", 5, "fb-3"); err != nil {
+			t.Fatalf("ListByReviewee: unexpected error: %v", err)
+		}
+		if gotRevieweeID != "reviewee-1" {
+			t.Fatalf("repo received reviewee_id %q, want reviewee-1", gotRevieweeID)
+		}
+		if gotLimit != 5 {
+			t.Fatalf("repo received limit %d, want 5", gotLimit)
+		}
+		if gotCursor != "fb-3" {
+			t.Fatalf("repo received cursor %q, want fb-3", gotCursor)
+		}
+	})
+
+	t.Run("default limit is applied when limit <= 0", func(t *testing.T) {
+		var gotLimit int
+		repo := &fakeFeedbackRepo{
+			listByReviewee: func(_ context.Context, _ string, limit int, _ string) ([]*model.Feedback, string, error) {
+				gotLimit = limit
+				return []*model.Feedback{}, "", nil
+			},
+		}
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if _, _, err := svc.ListByReviewee(context.Background(), "reviewee-1", 0, ""); err != nil {
+			t.Fatalf("ListByReviewee: unexpected error: %v", err)
+		}
+		if gotLimit != DefaultFeedbackListLimit {
+			t.Fatalf("got limit %d, want default %d", gotLimit, DefaultFeedbackListLimit)
+		}
+	})
+
+	t.Run("limit is capped at MaxFeedbackListLimit", func(t *testing.T) {
+		var gotLimit int
+		repo := &fakeFeedbackRepo{
+			listByReviewee: func(_ context.Context, _ string, limit int, _ string) ([]*model.Feedback, string, error) {
+				gotLimit = limit
+				return []*model.Feedback{}, "", nil
+			},
+		}
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if _, _, err := svc.ListByReviewee(context.Background(), "reviewee-1", 9999, ""); err != nil {
+			t.Fatalf("ListByReviewee: unexpected error: %v", err)
+		}
+		if gotLimit != MaxFeedbackListLimit {
+			t.Fatalf("got limit %d, want max %d", gotLimit, MaxFeedbackListLimit)
+		}
+	})
+
+	t.Run("pagination returns next cursor when more pages exist", func(t *testing.T) {
+		// 5 entries, page size 2: page 1 returns fb-2..fb-1 (newest first),
+		// nextCursor = last ID on the page; page 2 starts after that cursor.
+		repo := &fakeFeedbackRepo{
+			byReviewee: map[string][]*model.Feedback{
+				"reviewee-1": buildFeedbacks(5),
+			},
+		}
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		page1, cursor1, err := svc.ListByReviewee(context.Background(), "reviewee-1", 2, "")
+		if err != nil {
+			t.Fatalf("page 1: unexpected error: %v", err)
+		}
+		if len(page1) != 2 {
+			t.Fatalf("page 1: got %d feedbacks, want 2", len(page1))
+		}
+		if cursor1 == "" {
+			t.Fatal("page 1: expected non-empty nextCursor, got empty")
+		}
+
+		page2, cursor2, err := svc.ListByReviewee(context.Background(), "reviewee-1", 2, cursor1)
+		if err != nil {
+			t.Fatalf("page 2: unexpected error: %v", err)
+		}
+		if len(page2) != 2 {
+			t.Fatalf("page 2: got %d feedbacks, want 2", len(page2))
+		}
+		// page 2's first item must not duplicate page 1's last item.
+		if page2[0].ID == page1[1].ID {
+			t.Fatalf("page 2 repeats id %q from page 1", page1[1].ID)
+		}
+		// Final page (3 entries left, page size 2) should return 1 item and
+		// an empty cursor signalling the end.
+		page3, cursor3, err := svc.ListByReviewee(context.Background(), "reviewee-1", 2, cursor2)
+		if err != nil {
+			t.Fatalf("page 3: unexpected error: %v", err)
+		}
+		if len(page3) != 1 {
+			t.Fatalf("page 3: got %d feedbacks, want 1", len(page3))
+		}
+		if cursor3 != "" {
+			t.Fatalf("page 3: expected empty nextCursor, got %q", cursor3)
+		}
+	})
+
+	t.Run("empty reviewee id is rejected", func(t *testing.T) {
+		svc, _, _ := newFeedbackTestService()
+		_, _, err := svc.ListByReviewee(context.Background(), "  ", 0, "")
+		if err == nil {
+			t.Fatal("expected error for empty reviewee id, got nil")
+		}
+		if !apperror.IsInvalidFeedback(err) {
+			t.Fatalf("expected ErrInvalidFeedback, got %T: %v", err, err)
+		}
+		if err.Error() != "reviewee_id is required" {
+			t.Fatalf("expected message %q, got %q", "reviewee_id is required", err.Error())
+		}
+	})
+
+	t.Run("unknown cursor propagates ErrFeedbackNotFound", func(t *testing.T) {
+		repo := &fakeFeedbackRepo{
+			byReviewee: map[string][]*model.Feedback{
+				"reviewee-1": buildFeedbacks(1),
+			},
+		}
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		_, _, err := svc.ListByReviewee(context.Background(), "reviewee-1", 10, "does-not-exist")
+		if err == nil {
+			t.Fatal("expected error for unknown cursor, got nil")
+		}
+		if !errors.Is(err, apperror.ErrFeedbackNotFound) {
+			t.Fatalf("expected ErrFeedbackNotFound, got %T: %v", err, err)
+		}
+	})
+
+	t.Run("repository error propagates", func(t *testing.T) {
+		repo := &fakeFeedbackRepo{
+			listByReviewee: func(_ context.Context, _ string, _ int, _ string) ([]*model.Feedback, string, error) {
+				return nil, "", errors.New("db down")
+			},
+		}
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		_, _, err := svc.ListByReviewee(context.Background(), "reviewee-1", 10, "")
+		if err == nil {
+			t.Fatal("expected repository error to propagate, got nil")
+		}
+		// Non-not-found errors should surface as a wrapped error, not an
+		// ErrInvalidFeedback, so the handler maps them to 500 rather than 400.
+		if apperror.IsInvalidFeedback(err) {
+			t.Fatalf("expected a non-validation error, got ErrInvalidFeedback: %v", err)
+		}
+	})
+}
+
+// itoa is a tiny strconv-free itoa used only inside test helpers to build
+// feedback IDs. Using strconv.Itoa here would pull in an extra import for one
+// helper; this keeps the test file self-contained.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
 }

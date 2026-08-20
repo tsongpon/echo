@@ -44,6 +44,12 @@ var ErrEmailTaken = errors.New("email already taken")
 // period_id refers to an existing period.
 var ErrFeedbackPeriodNotFound = errors.New("feedback period not found")
 
+// ErrFeedbackNotFound is returned when no feedback entry matches a lookup.
+// Used by the feedback service's list path to signal that a cursor passed by
+// the client does not refer to an existing feedback entry, so the handler can
+// map it to a 400 "unknown cursor".
+var ErrFeedbackNotFound = errors.New("feedback not found")
+
 // ErrInvalidEmployee indicates a validation failure of an employee input. It
 // carries a human-readable message describing the failed validation.
 type ErrInvalidEmployee string

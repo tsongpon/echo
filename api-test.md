@@ -17,6 +17,7 @@ are JSON; responses are JSON. The dev server listens on `http://localhost:1323`.
 | POST   | `/v1/feedback-periods` | Bearer token¹ | Open a feedback period for the caller's organization (org admins only). |
 | GET    | `/v1/feedback-periods` | Bearer token | List the feedback periods for the caller's organization.        |
 | POST   | `/v1/feedbacks`      | Bearer token   | File a feedback entry for a colleague.                        |
+| GET    | `/v1/me/feedbacks`   | Bearer token   | List feedback received by the current employee (paginated).   |
 
 ¹ The caller's JWT `role` claim must be `org_admin`; any other role gets `403`.
 
@@ -471,3 +472,74 @@ Expected response: `HTTP 201`:
 | 400    | `"<validation message>"`                        | Missing `period_id`/`reviewee_id`, self-review, a score outside 1–5, or an unknown `visibility`. |
 | 401    | `"missing or invalid token"`                    | No/invalid `Authorization` header or bad token.               |
 | 500    | `"failed to create feedback"`                   | Unexpected server error.                                      |
+
+---
+
+## List My Feedback
+
+`GET /v1/me/feedbacks` — returns one page of feedback entries received by the
+authenticated employee (i.e. entries others have written about them), ordered
+by `created_at` descending (newest first). Requires a valid `Bearer` JWT; any
+authenticated employee may list their own received feedback. The reviewee is
+taken from the caller's JWT subject, so an employee can only list their own
+received feedback.
+
+Visibility policy: for entries with `visibility: "anonymous"`, the reviewer's
+identity is hidden from the caller (the reviewee) — `reviewer_id` is empty in
+the response. Entries with `visibility: "named"` include `reviewer_id` as usual.
+
+Pagination is cursor-based and controlled by two optional query parameters:
+
+| Parameter | Default | Notes                                                                                  |
+|-----------|---------|----------------------------------------------------------------------------------------|
+| `limit`   | `20`    | Page size. Non-numeric or `<= 0` falls back to the default; values above `100` are capped. |
+| `cursor`  | —       | The `next_cursor` value from the previous page (a feedback ID). Omit on the first page. An unknown cursor returns `400`. |
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X GET "http://localhost:1323/v1/me/feedbacks?limit=20&cursor=0190bbbb-..." \
+  -H "Authorization: Bearer <access_token>"
+```
+
+Expected response: `HTTP 200`:
+
+```json
+{
+  "feedbacks": [
+    {
+      "id": "0190abcd-...",
+      "period_id": "0190abca-...",
+      "reviewee_id": "<authenticated employee id>",
+      "reviewer_id": "",
+      "communication_score": 4,
+      "leadership_score": 5,
+      "technical_score": 3,
+      "collaboration_score": 4,
+      "delivery_score": 5,
+      "trust_score": 2,
+      "strengths_comment": "great teammate",
+      "weaknesses_comment": "could document more",
+      "visibility": "anonymous",
+      "created_at": "2026-08-18T10:00:00Z",
+      "updated_at": "2026-08-18T10:00:00Z"
+    }
+  ],
+  "next_cursor": "0190abcd-..."
+}
+```
+
+`next_cursor` is the ID of the last feedback entry on this page; pass it as
+`cursor` on the next request to fetch the following page. When there are no
+more pages `next_cursor` is `null`:
+
+```json
+{ "feedbacks": [], "next_cursor": null }
+```
+
+An employee who has received no feedback returns `HTTP 200` with
+`{"feedbacks": [], "next_cursor": null}`.
+
+| Status | `message`                                       | When                                                          |
+|--------|-------------------------------------------------|---------------------------------------------------------------|
+| 400    | `"unknown cursor"`                              | `cursor` does not refer to an existing feedback entry.         |
+| 401    | `"missing or invalid token"`                    | No/invalid `Authorization` header or bad token.               |
+| 500    | `"failed to list feedbacks"`                    | Unexpected server error.                                      |

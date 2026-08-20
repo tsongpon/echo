@@ -474,6 +474,53 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /v1/me/feedbacks:
+    get:
+      tags: [Feedback]
+      summary: List feedback received by the current employee
+      description: |
+        Returns one page of feedback entries received by the authenticated
+        employee (i.e. entries others have written about them), ordered by
+        `created_at` descending (newest first). The reviewee is the
+        authenticated employee (taken from the JWT subject), so an employee can
+        only list their own received feedback.
+
+        Pagination is cursor-based: pass the `next_cursor` value from one
+        response as the `cursor` query parameter on the next request. When
+        `next_cursor` is `null` there are no more pages. An unknown cursor
+        (one that does not refer to an existing feedback entry) returns `400`.
+
+        Visibility policy: for entries with `visibility: "anonymous"`, the
+        reviewer's identity is hidden from the reviewee (the caller of this
+        endpoint) — `reviewer_id` is empty in the response. Entries with
+        `visibility: "named"` include `reviewer_id` as usual.
+      operationId: listMyFeedbacks
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ListLimit"
+        - $ref: "#/components/parameters/ListCursor"
+      responses:
+        "200":
+          description: One page of received feedback plus the next-page cursor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackListResponse"
+        "400":
+          description: Unknown cursor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                unknownCursor:
+                  value: { message: "unknown cursor" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
 # ----------------------------------------------------------------------------
 # Components
 # ----------------------------------------------------------------------------
@@ -970,3 +1017,44 @@ components:
         - visibility
         - created_at
         - updated_at
+
+    FeedbackListResponse:
+      type: object
+      description: |
+        One page of feedback entries received by the caller plus the next-page
+        cursor. For entries with `visibility: "anonymous"`, `reviewer_id` is
+        empty so the reviewee (the caller of `GET /v1/me/feedbacks`) cannot
+        identify the reviewer; `reviewer_id` is present for `visibility: "named"`
+        entries.
+      properties:
+        feedbacks:
+          type: array
+          description: The feedback entries on this page, ordered by created_at descending. Never null (empty array when the caller has received no feedback).
+          items:
+            $ref: "#/components/schemas/FeedbackResponse"
+        next_cursor:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            The ID of the last feedback entry on this page; pass it as `cursor`
+            on the next request. Null when there are no more pages.
+      required: [feedbacks, next_cursor]
+      example:
+        feedbacks:
+          - id: 0190abcd-0000-7000-8000-000000000000
+            period_id: 0190abca-0000-7000-8000-000000000000
+            reviewee_id: 0190aaaa-0000-7000-8000-000000000000
+            reviewer_id: ""
+            communication_score: 4
+            leadership_score: 5
+            technical_score: 3
+            collaboration_score: 4
+            delivery_score: 5
+            trust_score: 2
+            strengths_comment: great teammate
+            weaknesses_comment: could document more
+            visibility: anonymous
+            created_at: "2026-08-18T10:00:00Z"
+            updated_at: "2026-08-18T10:00:00Z"
+        next_cursor: 0190abcd-0000-7000-8000-000000000000
