@@ -21,6 +21,7 @@ import (
 type FeedbackService interface {
 	Create(ctx context.Context, reviewerID string, feedback *model.Feedback) (*model.Feedback, error)
 	ListByReviewee(ctx context.Context, revieweeID string, limit int, cursorID string) ([]*model.Feedback, string, error)
+	ListByRevieweeForManager(ctx context.Context, callerID, revieweeID string, limit int, cursorID string) ([]*model.Feedback, string, error)
 }
 
 // FeedbackHandler exposes HTTP endpoints for feedback operations.
@@ -123,6 +124,71 @@ func (h *FeedbackHandler) ListMyFeedbacks(c *echo.Context) error {
 		}
 		h.logger.Error("feedback list failed",
 			"error", err, "caller_id", claims.Subject, "cursor", cursorID)
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to list feedbacks")
+	}
+
+	return c.JSON(http.StatusOK, dto.ToFeedbackListResponse(feedbacks, nextCursorID))
+}
+
+// ListEmployeeFeedbacks handles GET /v1/employees/:id/feedbacks: returns one
+// page of feedback entries received by the named employee, but only when the
+// authenticated caller is that employee's manager. The route must be mounted
+// behind the Auth middleware. A caller who is not the reviewee's manager
+// gets 403; an unknown employee ID gets 404.
+//
+// Pagination is controlled by two optional query parameters, identical to
+// GET /v1/me/feedbacks:
+//   - limit:  page size, default 20, max 100. Non-numeric or <= 0 falls back to
+//     the default; values above the max are capped.
+//   - cursor: the ID of the last feedback entry from the previous page (the
+//     next_cursor value the client received). Omit on the first page.
+//
+// Visibility policy: as with the reviewee's own view, entries with
+// visibility == "anonymous" have their reviewer_id blanked in the response —
+// the manager sees the same redacted view the reviewee sees. Named entries
+// include reviewer_id as usual.
+func (h *FeedbackHandler) ListEmployeeFeedbacks(c *echo.Context) error {
+	claims := ClaimsFromContext(c)
+	if claims == nil {
+		// Auth middleware should have already rejected the request; this guard
+		// protects against accidental wiring without the middleware.
+		h.logger.Warn("manager feedback list rejected: missing claims (route miswired?)")
+		return echo.NewHTTPError(http.StatusUnauthorized, "missing or invalid token")
+	}
+
+	limit := 0
+	if raw := c.QueryParam("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			limit = n
+		}
+	}
+	cursorID := c.QueryParam("cursor")
+
+	feedbacks, nextCursorID, err := h.feedbacks.ListByRevieweeForManager(c.Request().Context(), claims.Subject, c.Param("id"), limit, cursorID)
+	if err != nil {
+		switch {
+		case errors.Is(err, apperror.ErrForbidden):
+			h.logger.Warn("manager feedback list rejected: forbidden",
+				"caller_id", claims.Subject, "reviewee_id", c.Param("id"))
+			return echo.NewHTTPError(http.StatusForbidden, "only the employee's manager can view their feedback")
+		case errors.Is(err, apperror.ErrEmployeeNotFound):
+			h.logger.Warn("manager feedback list rejected: reviewee not found",
+				"caller_id", claims.Subject, "reviewee_id", c.Param("id"))
+			return echo.NewHTTPError(http.StatusNotFound, "employee not found")
+		case errors.Is(err, apperror.ErrFeedbackNotFound):
+			// An unknown cursor: the cursor ID did not match a stored feedback.
+			h.logger.Warn("manager feedback list rejected: unknown cursor",
+				"caller_id", claims.Subject, "reviewee_id", c.Param("id"), "cursor", cursorID)
+			return echo.NewHTTPError(http.StatusBadRequest, "unknown cursor")
+		}
+		var invalid apperror.ErrInvalidFeedback
+		if errors.As(err, &invalid) {
+			h.logger.Warn("manager feedback list rejected: validation failed",
+				"caller_id", claims.Subject, "reviewee_id", c.Param("id"), "reason", invalid.Error())
+			return echo.NewHTTPError(http.StatusBadRequest, invalid.Error())
+		}
+		h.logger.Error("manager feedback list failed",
+			"error", err, "caller_id", claims.Subject, "reviewee_id", c.Param("id"), "cursor", cursorID)
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to list feedbacks")
 	}
 

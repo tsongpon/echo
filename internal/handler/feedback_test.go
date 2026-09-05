@@ -25,6 +25,7 @@ type fakeFeedbackService struct {
 	gotReviewerID  string
 	createFn       func(ctx context.Context, reviewerID string, feedback *model.Feedback) (*model.Feedback, error)
 	listByReviewee func(ctx context.Context, revieweeID string, limit int, cursorID string) ([]*model.Feedback, string, error)
+	listForManager func(ctx context.Context, callerID, revieweeID string, limit int, cursorID string) ([]*model.Feedback, string, error)
 }
 
 func (f *fakeFeedbackService) Create(_ context.Context, reviewerID string, feedback *model.Feedback) (*model.Feedback, error) {
@@ -58,6 +59,13 @@ func (f *fakeFeedbackService) Create(_ context.Context, reviewerID string, feedb
 func (f *fakeFeedbackService) ListByReviewee(_ context.Context, revieweeID string, limit int, cursorID string) ([]*model.Feedback, string, error) {
 	if f.listByReviewee != nil {
 		return f.listByReviewee(context.Background(), revieweeID, limit, cursorID)
+	}
+	return []*model.Feedback{}, "", nil
+}
+
+func (f *fakeFeedbackService) ListByRevieweeForManager(_ context.Context, callerID, revieweeID string, limit int, cursorID string) ([]*model.Feedback, string, error) {
+	if f.listForManager != nil {
+		return f.listForManager(context.Background(), callerID, revieweeID, limit, cursorID)
 	}
 	return []*model.Feedback{}, "", nil
 }
@@ -392,6 +400,203 @@ func TestListMyFeedbacks_Handler(t *testing.T) {
 		c := e.NewContext(req, rec)
 
 		err := h.ListMyFeedbacks(c)
+		he, ok := err.(*echo.HTTPError)
+		if !ok {
+			t.Fatalf("expected *echo.HTTPError, got %T: %v", err, err)
+		}
+		if he.Code != http.StatusUnauthorized {
+			t.Fatalf("got status %d, want %d", he.Code, http.StatusUnauthorized)
+		}
+	})
+}
+
+func TestListEmployeeFeedbacks_Handler(t *testing.T) {
+	signer, err := auth.NewTokenSigner("test-secret", 0)
+	if err != nil {
+		t.Fatalf("NewTokenSigner: %v", err)
+	}
+
+	caller := &model.Employee{
+		ID:               "emp-1",
+		Name:             "Alice",
+		OrganizationName: "Acme",
+		Role:             model.RoleUser,
+		Title:            "Manager",
+		Email:            "alice@example.com",
+	}
+
+	// newContext builds an echo context for the GET route with the :id path
+	// parameter set and the caller's claims stored, mimicking what the router
+	// and Auth middleware do for a real request.
+	newContext := func(query string) (*echo.Context, *httptest.ResponseRecorder) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/employees/emp-2/feedbacks"+query, nil)
+		rec := httptest.NewRecorder()
+		e := echo.New()
+		c := e.NewContext(req, rec)
+		c.SetPath("/v1/employees/:id/feedbacks")
+		c.SetPathValues(echo.PathValues{{Name: "id", Value: "emp-2"}})
+		token, err := signer.Sign(caller)
+		if err != nil {
+			t.Fatalf("Sign: %v", err)
+		}
+		claims, err := signer.Verify(token)
+		if err != nil {
+			t.Fatalf("Verify: %v", err)
+		}
+		c.Set(contextKeyUser, claims)
+		return c, rec
+	}
+
+	t.Run("manager sees redacted anonymous feedback", func(t *testing.T) {
+		feedbacks := []*model.Feedback{
+			{ID: "fb-1", RevieweeID: "emp-2", ReviewerID: "reviewer-9", StrengthsComment: "s", WeaknessesComment: "w", Visibility: model.FeedbackVisibilityNamed},
+			{ID: "fb-2", RevieweeID: "emp-2", ReviewerID: "reviewer-7", StrengthsComment: "s", WeaknessesComment: "w", Visibility: model.FeedbackVisibilityAnonymous},
+		}
+		svc := &fakeFeedbackService{
+			listForManager: func(_ context.Context, callerID, revieweeID string, _ int, _ string) ([]*model.Feedback, string, error) {
+				if callerID != "emp-1" {
+					t.Fatalf("handler passed caller %q, want emp-1 (from JWT)", callerID)
+				}
+				if revieweeID != "emp-2" {
+					t.Fatalf("handler passed reviewee %q, want emp-2 (from path)", revieweeID)
+				}
+				return feedbacks, "", nil
+			},
+		}
+		h := NewFeedbackHandler(svc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		c, rec := newContext("")
+		if err := h.ListEmployeeFeedbacks(c); err != nil {
+			t.Fatalf("ListEmployeeFeedbacks: unexpected error: %v", err)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("got status %d, want %d", rec.Code, http.StatusOK)
+		}
+		body := rec.Body.String()
+		// The named entry keeps its reviewer_id.
+		if !strings.Contains(body, `"reviewer_id":"reviewer-9"`) {
+			t.Fatalf("expected named entry to keep reviewer_id, got %s", body)
+		}
+		// The anonymous entry must have its reviewer_id blanked.
+		if strings.Contains(body, "reviewer-7") {
+			t.Fatalf("anonymous reviewer id must be redacted for the manager, got %s", body)
+		}
+	})
+
+	t.Run("limit and cursor reach the service", func(t *testing.T) {
+		var gotLimit int
+		var gotCursor string
+		svc := &fakeFeedbackService{
+			listForManager: func(_ context.Context, _ string, _ string, limit int, cursorID string) ([]*model.Feedback, string, error) {
+				gotLimit = limit
+				gotCursor = cursorID
+				return []*model.Feedback{}, "", nil
+			},
+		}
+		h := NewFeedbackHandler(svc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		c, _ := newContext("?limit=7&cursor=fb-1")
+		if err := h.ListEmployeeFeedbacks(c); err != nil {
+			t.Fatalf("ListEmployeeFeedbacks: unexpected error: %v", err)
+		}
+		if gotLimit != 7 {
+			t.Fatalf("handler passed limit %d, want 7", gotLimit)
+		}
+		if gotCursor != "fb-1" {
+			t.Fatalf("handler passed cursor %q, want fb-1", gotCursor)
+		}
+	})
+
+	t.Run("non-manager caller maps to 403", func(t *testing.T) {
+		svc := &fakeFeedbackService{
+			listForManager: func(_ context.Context, _ string, _ string, _ int, _ string) ([]*model.Feedback, string, error) {
+				return nil, "", apperror.ErrForbidden
+			},
+		}
+		h := NewFeedbackHandler(svc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		c, _ := newContext("")
+		err := h.ListEmployeeFeedbacks(c)
+		he, ok := err.(*echo.HTTPError)
+		if !ok {
+			t.Fatalf("expected *echo.HTTPError, got %T: %v", err, err)
+		}
+		if he.Code != http.StatusForbidden {
+			t.Fatalf("got status %d, want %d", he.Code, http.StatusForbidden)
+		}
+	})
+
+	t.Run("unknown employee maps to 404", func(t *testing.T) {
+		svc := &fakeFeedbackService{
+			listForManager: func(_ context.Context, _ string, _ string, _ int, _ string) ([]*model.Feedback, string, error) {
+				return nil, "", apperror.ErrEmployeeNotFound
+			},
+		}
+		h := NewFeedbackHandler(svc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		c, _ := newContext("")
+		err := h.ListEmployeeFeedbacks(c)
+		he, ok := err.(*echo.HTTPError)
+		if !ok {
+			t.Fatalf("expected *echo.HTTPError, got %T: %v", err, err)
+		}
+		if he.Code != http.StatusNotFound {
+			t.Fatalf("got status %d, want %d", he.Code, http.StatusNotFound)
+		}
+	})
+
+	t.Run("unknown cursor maps to 400", func(t *testing.T) {
+		svc := &fakeFeedbackService{
+			listForManager: func(_ context.Context, _ string, _ string, _ int, _ string) ([]*model.Feedback, string, error) {
+				return nil, "", apperror.ErrFeedbackNotFound
+			},
+		}
+		h := NewFeedbackHandler(svc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		c, _ := newContext("?cursor=ghost")
+		err := h.ListEmployeeFeedbacks(c)
+		he, ok := err.(*echo.HTTPError)
+		if !ok {
+			t.Fatalf("expected *echo.HTTPError, got %T: %v", err, err)
+		}
+		if he.Code != http.StatusBadRequest {
+			t.Fatalf("got status %d, want %d", he.Code, http.StatusBadRequest)
+		}
+		if he.Message != "unknown cursor" {
+			t.Fatalf("expected message %q, got %v", "unknown cursor", he.Message)
+		}
+	})
+
+	t.Run("internal error maps to 500", func(t *testing.T) {
+		svc := &fakeFeedbackService{
+			listForManager: func(_ context.Context, _ string, _ string, _ int, _ string) ([]*model.Feedback, string, error) {
+				return nil, "", errors.New("db down")
+			},
+		}
+		h := NewFeedbackHandler(svc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		c, _ := newContext("")
+		err := h.ListEmployeeFeedbacks(c)
+		he, ok := err.(*echo.HTTPError)
+		if !ok {
+			t.Fatalf("expected *echo.HTTPError, got %T: %v", err, err)
+		}
+		if he.Code != http.StatusInternalServerError {
+			t.Fatalf("got status %d, want %d", he.Code, http.StatusInternalServerError)
+		}
+	})
+
+	t.Run("no token is unauthorized", func(t *testing.T) {
+		svc := &fakeFeedbackService{}
+		h := NewFeedbackHandler(svc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/employees/emp-2/feedbacks", nil)
+		rec := httptest.NewRecorder()
+
+		e := echo.New()
+		c := e.NewContext(req, rec)
+
+		err := h.ListEmployeeFeedbacks(c)
 		he, ok := err.(*echo.HTTPError)
 		if !ok {
 			t.Fatalf("expected *echo.HTTPError, got %T: %v", err, err)

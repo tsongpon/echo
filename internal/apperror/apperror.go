@@ -50,6 +50,14 @@ var ErrFeedbackPeriodNotFound = errors.New("feedback period not found")
 // map it to a 400 "unknown cursor".
 var ErrFeedbackNotFound = errors.New("feedback not found")
 
+// ErrForbidden is returned when the authenticated caller is not allowed to
+// perform the operation on the named resource (e.g. a caller who is not the
+// reviewee's manager requesting the reviewee's feedback). It is distinct from
+// an invalid input (400) and from a missing resource (404): the resource
+// exists and the request is well-formed, but this caller may not access it.
+// The handler maps it to 403.
+var ErrForbidden = errors.New("forbidden")
+
 // ErrInvalidEmployee indicates a validation failure of an employee input. It
 // carries a human-readable message describing the failed validation.
 type ErrInvalidEmployee string

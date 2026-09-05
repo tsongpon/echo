@@ -91,6 +91,22 @@ func (f *fakePeriodLookup) GetByID(ctx context.Context, id string) (*model.Feedb
 	return &model.FeedbackPeriod{ID: id, Name: "Test Period"}, nil
 }
 
+// fakeEmployeeLookup is an in-test stand-in for service.EmployeeLookup. It
+// serves GetByID from an in-memory map; a missing ID yields
+// apperror.ErrEmployeeNotFound, matching the real employee repository.
+type fakeEmployeeLookup struct {
+	byID   map[string]*model.Employee
+	gotIDs []string
+}
+
+func (f *fakeEmployeeLookup) GetByID(_ context.Context, id string) (*model.Employee, error) {
+	f.gotIDs = append(f.gotIDs, id)
+	if e, ok := f.byID[id]; ok {
+		return e, nil
+	}
+	return nil, apperror.ErrEmployeeNotFound
+}
+
 // newFeedbackTestService builds a FeedbackService backed by a fake feedback
 // repo, a fake period lookup (happy path: any period ID resolves), and a
 // discarding logger. Returns the period lookup so tests can override its
@@ -99,7 +115,7 @@ func newFeedbackTestService() (*FeedbackService, *fakeFeedbackRepo, *fakePeriodL
 	repo := &fakeFeedbackRepo{}
 	periods := &fakePeriodLookup{}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewFeedbackService(repo, periods, logger), repo, periods
+	return NewFeedbackService(repo, periods, nil, logger), repo, periods
 }
 
 // validFeedbackInput returns a feedback with all required fields and valid
@@ -232,7 +248,7 @@ func TestFeedback_Create(t *testing.T) {
 				return nil, errors.New("db down")
 			},
 		}
-		svc := NewFeedbackService(repo, &fakePeriodLookup{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		_, err := svc.Create(context.Background(), "reviewer-1", validFeedbackInput())
 		if err == nil {
 			t.Fatal("expected repository error to propagate, got nil")
@@ -424,7 +440,7 @@ func TestFeedback_ListByReviewee(t *testing.T) {
 				"reviewee-1": buildFeedbacks(2),
 			},
 		}
-		svc := NewFeedbackService(repo, &fakePeriodLookup{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 		got, nextCursor, err := svc.ListByReviewee(context.Background(), "reviewee-1", 0, "")
 		if err != nil {
@@ -450,7 +466,7 @@ func TestFeedback_ListByReviewee(t *testing.T) {
 				return []*model.Feedback{}, "", nil
 			},
 		}
-		svc := NewFeedbackService(repo, &fakePeriodLookup{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 		if _, _, err := svc.ListByReviewee(context.Background(), "reviewee-1", 5, "fb-3"); err != nil {
 			t.Fatalf("ListByReviewee: unexpected error: %v", err)
@@ -474,7 +490,7 @@ func TestFeedback_ListByReviewee(t *testing.T) {
 				return []*model.Feedback{}, "", nil
 			},
 		}
-		svc := NewFeedbackService(repo, &fakePeriodLookup{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		if _, _, err := svc.ListByReviewee(context.Background(), "reviewee-1", 0, ""); err != nil {
 			t.Fatalf("ListByReviewee: unexpected error: %v", err)
 		}
@@ -491,7 +507,7 @@ func TestFeedback_ListByReviewee(t *testing.T) {
 				return []*model.Feedback{}, "", nil
 			},
 		}
-		svc := NewFeedbackService(repo, &fakePeriodLookup{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		if _, _, err := svc.ListByReviewee(context.Background(), "reviewee-1", 9999, ""); err != nil {
 			t.Fatalf("ListByReviewee: unexpected error: %v", err)
 		}
@@ -508,7 +524,7 @@ func TestFeedback_ListByReviewee(t *testing.T) {
 				"reviewee-1": buildFeedbacks(5),
 			},
 		}
-		svc := NewFeedbackService(repo, &fakePeriodLookup{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 		page1, cursor1, err := svc.ListByReviewee(context.Background(), "reviewee-1", 2, "")
 		if err != nil {
@@ -566,7 +582,7 @@ func TestFeedback_ListByReviewee(t *testing.T) {
 				"reviewee-1": buildFeedbacks(1),
 			},
 		}
-		svc := NewFeedbackService(repo, &fakePeriodLookup{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		_, _, err := svc.ListByReviewee(context.Background(), "reviewee-1", 10, "does-not-exist")
 		if err == nil {
 			t.Fatal("expected error for unknown cursor, got nil")
@@ -582,7 +598,7 @@ func TestFeedback_ListByReviewee(t *testing.T) {
 				return nil, "", errors.New("db down")
 			},
 		}
-		svc := NewFeedbackService(repo, &fakePeriodLookup{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		_, _, err := svc.ListByReviewee(context.Background(), "reviewee-1", 10, "")
 		if err == nil {
 			t.Fatal("expected repository error to propagate, got nil")
@@ -618,4 +634,105 @@ func itoa(n int) string {
 		buf[i] = '-'
 	}
 	return string(buf[i:])
+}
+
+// newManagerTestService builds a FeedbackService wired with a fake employee
+// lookup seeded with a manager/reviewee pair, plus a feedback repo seeded
+// with two entries for the reviewee (one anonymous, one named). It returns
+// the service and the seeded feedback for assertions.
+func newManagerTestService(t *testing.T) (*FeedbackService, *fakeFeedbackRepo) {
+	t.Helper()
+	managerID := "manager-1"
+	revieweeID := "reviewee-1"
+	employees := &fakeEmployeeLookup{byID: map[string]*model.Employee{
+		revieweeID: {ID: revieweeID, Name: "Carol", ManagerID: &managerID},
+		"orphan-1": {ID: "orphan-1", Name: "NoManager"},
+	}}
+
+	repo := &fakeFeedbackRepo{byReviewee: map[string][]*model.Feedback{
+		revieweeID: {
+			{ID: "fb-1", RevieweeID: revieweeID, ReviewerID: "reviewer-9", StrengthsComment: "s", WeaknessesComment: "w", Visibility: model.FeedbackVisibilityNamed},
+			{ID: "fb-2", RevieweeID: revieweeID, ReviewerID: "reviewer-7", StrengthsComment: "s", WeaknessesComment: "w", Visibility: model.FeedbackVisibilityAnonymous},
+		},
+	}}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return NewFeedbackService(repo, &fakePeriodLookup{}, employees, logger), repo
+}
+
+func TestFeedback_ListByRevieweeForManager(t *testing.T) {
+	t.Run("manager sees reviewee feedback", func(t *testing.T) {
+		svc, _ := newManagerTestService(t)
+
+		got, nextCursor, err := svc.ListByRevieweeForManager(context.Background(), "manager-1", "reviewee-1", 0, "")
+		if err != nil {
+			t.Fatalf("ListByRevieweeForManager: %v", err)
+		}
+		if len(got) != 2 || nextCursor != "" {
+			t.Fatalf("expected 2 feedbacks and no cursor, got %d and %q", len(got), nextCursor)
+		}
+	})
+
+	t.Run("non-manager caller is forbidden", func(t *testing.T) {
+		svc, _ := newManagerTestService(t)
+
+		_, _, err := svc.ListByRevieweeForManager(context.Background(), "someone-else", "reviewee-1", 0, "")
+		if !errors.Is(err, apperror.ErrForbidden) {
+			t.Fatalf("expected ErrForbidden for non-manager caller, got %v", err)
+		}
+	})
+
+	t.Run("reviewee without manager is forbidden to anyone", func(t *testing.T) {
+		svc, _ := newManagerTestService(t)
+
+		_, _, err := svc.ListByRevieweeForManager(context.Background(), "manager-1", "orphan-1", 0, "")
+		if !errors.Is(err, apperror.ErrForbidden) {
+			t.Fatalf("expected ErrForbidden for manager-less reviewee, got %v", err)
+		}
+	})
+
+	t.Run("unknown reviewee is not found", func(t *testing.T) {
+		svc, _ := newManagerTestService(t)
+
+		_, _, err := svc.ListByRevieweeForManager(context.Background(), "manager-1", "ghost-1", 0, "")
+		if !errors.Is(err, apperror.ErrEmployeeNotFound) {
+			t.Fatalf("expected ErrEmployeeNotFound for unknown reviewee, got %v", err)
+		}
+	})
+
+	t.Run("fails closed without employee lookup", func(t *testing.T) {
+		repo := &fakeFeedbackRepo{}
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		_, _, err := svc.ListByRevieweeForManager(context.Background(), "manager-1", "reviewee-1", 0, "")
+		if !errors.Is(err, apperror.ErrForbidden) {
+			t.Fatalf("expected ErrForbidden when employee lookup is nil, got %v", err)
+		}
+	})
+
+	t.Run("cursor semantics delegate to ListByReviewee", func(t *testing.T) {
+		svc, _ := newManagerTestService(t)
+
+		_, _, err := svc.ListByRevieweeForManager(context.Background(), "manager-1", "reviewee-1", 0, "ghost-cursor")
+		if !errors.Is(err, apperror.ErrFeedbackNotFound) {
+			t.Fatalf("expected ErrFeedbackNotFound for unknown cursor, got %v", err)
+		}
+	})
+
+	t.Run("missing caller id is invalid", func(t *testing.T) {
+		svc, _ := newManagerTestService(t)
+
+		_, _, err := svc.ListByRevieweeForManager(context.Background(), "", "reviewee-1", 0, "")
+		if !apperror.IsInvalidFeedback(err) {
+			t.Fatalf("expected ErrInvalidFeedback for missing caller, got %v", err)
+		}
+	})
+
+	t.Run("missing reviewee id is invalid", func(t *testing.T) {
+		svc, _ := newManagerTestService(t)
+
+		_, _, err := svc.ListByRevieweeForManager(context.Background(), "manager-1", "", 0, "")
+		if !apperror.IsInvalidFeedback(err) {
+			t.Fatalf("expected ErrInvalidFeedback for missing reviewee, got %v", err)
+		}
+	})
 }

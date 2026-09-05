@@ -295,6 +295,84 @@ func (r *EmployeeFirestoreRepository) ListByOrganization(ctx context.Context, or
 	return employees, nextCursorID, nil
 }
 
+// ListByManager returns one page of employees whose manager_id matches the
+// given manager ID, ordered by name ascending, plus the ID of the last
+// employee on the page for use as the next page's cursor.
+//
+// Pagination is cursor-based: when cursorID is non-empty, the cursor
+// employee's document snapshot is fetched first and used as a StartAfter
+// point. Using the snapshot (rather than the bare name value) preserves
+// correct ordering when two employees share a name, because Firestore's
+// StartAfter on a snapshot breaks ties by document ID. The cursor must refer
+// to an existing employee; an unknown cursor returns
+// apperror.ErrEmployeeNotFound so the handler can map it to a 400.
+//
+// To detect whether another page exists, the query fetches limit+1 rows and
+// the caller only sees the first limit; the extra row (if any) is discarded
+// but its presence indicates more results. When the query returns fewer than
+// limit+1 rows the returned nextCursorID is empty, signalling the end of the
+// listing. Returns an empty (non-nil) slice when no employees match.
+//
+// NOTE: this query requires a Firestore composite index on
+// (manager_id ASC, name ASC). The index must be created out-of-band (e.g. via
+// the GCP console or `gcloud firestore indexes composite create`); see the
+// note on ListByReviewee in the feedback repository for the failure mode.
+func (r *EmployeeFirestoreRepository) ListByManager(ctx context.Context, managerID string, limit int, cursorID string) ([]*model.Employee, string, error) {
+	if strings.TrimSpace(managerID) == "" {
+		return []*model.Employee{}, "", nil
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+
+	query := r.client.Collection(EmployeeCollection).
+		Where("manager_id", "==", managerID).
+		OrderBy("name", firestore.Asc).
+		Limit(limit + 1)
+
+	if strings.TrimSpace(cursorID) != "" {
+		cursorSnap, err := r.client.Collection(EmployeeCollection).Doc(cursorID).Get(ctx)
+		if status.Code(err) == codes.NotFound {
+			return nil, "", apperror.ErrEmployeeNotFound
+		}
+		if err != nil {
+			r.logError("firestore: fetch employee cursor failed", err, "cursor_id", cursorID)
+			return nil, "", fmt.Errorf("firestore: fetch employee cursor: %w", err)
+		}
+		query = query.StartAfter(cursorSnap)
+	}
+
+	iter := query.Documents(ctx)
+	defer iter.Stop()
+
+	employees := []*model.Employee{}
+	for {
+		snapshot, err := iter.Next()
+		if errors.Is(err, iterator.Done) {
+			break
+		}
+		if err != nil {
+			r.logError("firestore: query employees by manager failed", err, "manager_id", managerID, "cursor_id", cursorID)
+			return nil, "", fmt.Errorf("firestore: query employees by manager: %w", err)
+		}
+		employee, err := r.toEmployee(snapshot)
+		if err != nil {
+			return nil, "", err
+		}
+		employees = append(employees, employee)
+	}
+
+	// If we got limit+1 rows, there is at least one more page. Trim the extra
+	// row from what we return, and use the last visible employee's ID as the
+	// next cursor. If we got limit or fewer, there is no next page.
+	nextCursorID := ""
+	if len(employees) > limit {
+		employees = employees[:limit]
+		nextCursorID = employees[limit-1].ID
+	}
+	return employees, nextCursorID, nil
+}
+
 // Update overwrites the mutable fields of the stored employee and returns the
 // updated record. ID and CreatedAt are preserved from the stored document;
 // UpdatedAt is refreshed.

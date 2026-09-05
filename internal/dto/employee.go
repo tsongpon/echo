@@ -24,6 +24,14 @@ type LoginRequest struct {
 	Password string `json:"password"`
 }
 
+// AssignManagerRequest is the request body for
+// PATCH /v1/employees/:id/manager. A non-null manager_id assigns that
+// employee as the target's manager; JSON null clears the assignment. An
+// empty string is invalid (the service rejects it) — use null to unassign.
+type AssignManagerRequest struct {
+	ManagerID *string `json:"manager_id"`
+}
+
 // LoginResponse is returned by POST /v1/login on successful authentication.
 type LoginResponse struct {
 	AccessToken string           `json:"access_token"`

@@ -29,6 +29,8 @@ type fakeEmployeeService struct {
 	registerEmp *model.Employee
 	registerErr error
 	listFn      func(ctx context.Context, organizationName string, limit int, cursorID string) ([]*model.Employee, string, error)
+	assignFn    func(ctx context.Context, callerID, targetID string, managerID *string) (*model.Employee, error)
+	reporteesFn func(ctx context.Context, managerID string, limit int, cursorID string) ([]*model.Employee, string, error)
 }
 
 func (f *fakeEmployeeService) Register(_ context.Context, _ string, _ *model.Employee) (*model.Employee, error) {
@@ -56,6 +58,20 @@ func (f *fakeEmployeeService) VerifyEmail(_ context.Context, _ string) error {
 func (f *fakeEmployeeService) ListByOrganization(_ context.Context, organizationName string, limit int, cursorID string) ([]*model.Employee, string, error) {
 	if f.listFn != nil {
 		return f.listFn(context.Background(), organizationName, limit, cursorID)
+	}
+	return []*model.Employee{}, "", nil
+}
+
+func (f *fakeEmployeeService) AssignManager(_ context.Context, callerID, targetID string, managerID *string) (*model.Employee, error) {
+	if f.assignFn != nil {
+		return f.assignFn(context.Background(), callerID, targetID, managerID)
+	}
+	return nil, nil
+}
+
+func (f *fakeEmployeeService) ListReportees(_ context.Context, managerID string, limit int, cursorID string) ([]*model.Employee, string, error) {
+	if f.reporteesFn != nil {
+		return f.reporteesFn(context.Background(), managerID, limit, cursorID)
 	}
 	return []*model.Employee{}, "", nil
 }
@@ -755,6 +771,386 @@ func TestListEmployees_Handler(t *testing.T) {
 		}
 		if rec.Code != http.StatusOK {
 			t.Fatalf("got status %d, want %d (non-admin allowed)", rec.Code, http.StatusOK)
+		}
+	})
+}
+
+func TestAssignManager_Handler(t *testing.T) {
+	signer, err := auth.NewTokenSigner("test-secret", 0)
+	if err != nil {
+		t.Fatalf("NewTokenSigner: %v", err)
+	}
+
+	caller := &model.Employee{
+		ID:               "emp-1",
+		Name:             "Alice",
+		OrganizationName: "Acme",
+		Role:             model.RoleOrgAdmin,
+		Title:            "Manager",
+		Email:            "alice@example.com",
+	}
+	updatedEmp := &model.Employee{
+		ID:               "emp-2",
+		Name:             "Bob",
+		OrganizationName: "Acme",
+		Role:             model.RoleUser,
+		Title:            "Engineer",
+		Email:            "bob@example.com",
+	}
+
+	// newContext builds an echo context for the PATCH route with the :id path
+	// parameter set, mimicking what the router does for a real request.
+	newContext := func(body string) (*echo.Context, *httptest.ResponseRecorder) {
+		req := httptest.NewRequest(http.MethodPatch, "/v1/employees/emp-2/manager", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		e := echo.New()
+		c := e.NewContext(req, rec)
+		c.SetPath("/v1/employees/:id/manager")
+		c.SetPathValues(echo.PathValues{{Name: "id", Value: "emp-2"}})
+		setClaims := func(c *echo.Context, e *model.Employee) {
+			token, err := signer.Sign(e)
+			if err != nil {
+				t.Fatalf("Sign: %v", err)
+			}
+			claims, err := signer.Verify(token)
+			if err != nil {
+				t.Fatalf("Verify: %v", err)
+			}
+			c.Set(contextKeyUser, claims)
+		}
+		setClaims(c, caller)
+		return c, rec
+	}
+
+	t.Run("success returns updated employee", func(t *testing.T) {
+		var gotManagerID *string
+		svc := &fakeEmployeeService{
+			assignFn: func(_ context.Context, callerID, targetID string, managerID *string) (*model.Employee, error) {
+				if callerID != "emp-1" {
+					t.Fatalf("handler passed caller %q, want emp-1 (from JWT)", callerID)
+				}
+				if targetID != "emp-2" {
+					t.Fatalf("handler passed target %q, want emp-2 (from path)", targetID)
+				}
+				gotManagerID = managerID
+				return updatedEmp, nil
+			},
+		}
+		h := NewEmployeeHandler(svc, signer, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		c, rec := newContext(`{"manager_id":"emp-1"}`)
+		if err := h.AssignManager(c); err != nil {
+			t.Fatalf("AssignManager: unexpected error: %v", err)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("got status %d, want %d", rec.Code, http.StatusOK)
+		}
+		if gotManagerID == nil || *gotManagerID != "emp-1" {
+			t.Fatalf("expected manager_id emp-1 to reach the service, got %+v", gotManagerID)
+		}
+		if !strings.Contains(rec.Body.String(), `"id":"emp-2"`) {
+			t.Fatalf("response missing updated employee: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("null manager_id reaches the service as nil", func(t *testing.T) {
+		var gotManagerID *string
+		svc := &fakeEmployeeService{
+			assignFn: func(_ context.Context, _ string, _ string, managerID *string) (*model.Employee, error) {
+				gotManagerID = managerID
+				return updatedEmp, nil
+			},
+		}
+		h := NewEmployeeHandler(svc, signer, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		c, _ := newContext(`{"manager_id":null}`)
+		if err := h.AssignManager(c); err != nil {
+			t.Fatalf("AssignManager: unexpected error: %v", err)
+		}
+		if gotManagerID != nil {
+			t.Fatalf("expected nil manager_id to reach the service, got %q", *gotManagerID)
+		}
+	})
+
+	t.Run("forbidden maps to 403", func(t *testing.T) {
+		svc := &fakeEmployeeService{
+			assignFn: func(_ context.Context, _ string, _ string, _ *string) (*model.Employee, error) {
+				return nil, apperror.ErrForbidden
+			},
+		}
+		h := NewEmployeeHandler(svc, signer, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		c, _ := newContext(`{"manager_id":"emp-1"}`)
+		err := h.AssignManager(c)
+		he, ok := err.(*echo.HTTPError)
+		if !ok {
+			t.Fatalf("expected *echo.HTTPError, got %T: %v", err, err)
+		}
+		if he.Code != http.StatusForbidden {
+			t.Fatalf("got status %d, want %d", he.Code, http.StatusForbidden)
+		}
+	})
+
+	t.Run("target not found maps to 404", func(t *testing.T) {
+		svc := &fakeEmployeeService{
+			assignFn: func(_ context.Context, _ string, _ string, _ *string) (*model.Employee, error) {
+				return nil, apperror.ErrEmployeeNotFound
+			},
+		}
+		h := NewEmployeeHandler(svc, signer, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		c, _ := newContext(`{"manager_id":"emp-1"}`)
+		err := h.AssignManager(c)
+		he, ok := err.(*echo.HTTPError)
+		if !ok {
+			t.Fatalf("expected *echo.HTTPError, got %T: %v", err, err)
+		}
+		if he.Code != http.StatusNotFound {
+			t.Fatalf("got status %d, want %d", he.Code, http.StatusNotFound)
+		}
+	})
+
+	t.Run("validation error maps to 400", func(t *testing.T) {
+		svc := &fakeEmployeeService{
+			assignFn: func(_ context.Context, _ string, _ string, _ *string) (*model.Employee, error) {
+				return nil, apperror.ErrInvalidEmployee("assignment would create a management cycle")
+			},
+		}
+		h := NewEmployeeHandler(svc, signer, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		c, _ := newContext(`{"manager_id":"emp-1"}`)
+		err := h.AssignManager(c)
+		he, ok := err.(*echo.HTTPError)
+		if !ok {
+			t.Fatalf("expected *echo.HTTPError, got %T: %v", err, err)
+		}
+		if he.Code != http.StatusBadRequest {
+			t.Fatalf("got status %d, want %d", he.Code, http.StatusBadRequest)
+		}
+		if he.Message != "assignment would create a management cycle" {
+			t.Fatalf("expected cycle message, got %v", he.Message)
+		}
+	})
+
+	t.Run("internal error maps to 500", func(t *testing.T) {
+		svc := &fakeEmployeeService{
+			assignFn: func(_ context.Context, _ string, _ string, _ *string) (*model.Employee, error) {
+				return nil, errors.New("db down")
+			},
+		}
+		h := NewEmployeeHandler(svc, signer, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		c, _ := newContext(`{"manager_id":"emp-1"}`)
+		err := h.AssignManager(c)
+		he, ok := err.(*echo.HTTPError)
+		if !ok {
+			t.Fatalf("expected *echo.HTTPError, got %T: %v", err, err)
+		}
+		if he.Code != http.StatusInternalServerError {
+			t.Fatalf("got status %d, want %d", he.Code, http.StatusInternalServerError)
+		}
+	})
+
+	t.Run("malformed body maps to 400", func(t *testing.T) {
+		svc := &fakeEmployeeService{}
+		h := NewEmployeeHandler(svc, signer, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		c, _ := newContext(`{not-json`)
+		err := h.AssignManager(c)
+		he, ok := err.(*echo.HTTPError)
+		if !ok {
+			t.Fatalf("expected *echo.HTTPError, got %T: %v", err, err)
+		}
+		if he.Code != http.StatusBadRequest {
+			t.Fatalf("got status %d, want %d", he.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("no token is unauthorized", func(t *testing.T) {
+		svc := &fakeEmployeeService{}
+		h := NewEmployeeHandler(svc, signer, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		req := httptest.NewRequest(http.MethodPatch, "/v1/employees/emp-2/manager", strings.NewReader(`{"manager_id":"emp-1"}`))
+		rec := httptest.NewRecorder()
+		e := echo.New()
+		c := e.NewContext(req, rec)
+
+		err := h.AssignManager(c)
+		he, ok := err.(*echo.HTTPError)
+		if !ok {
+			t.Fatalf("expected *echo.HTTPError, got %T: %v", err, err)
+		}
+		if he.Code != http.StatusUnauthorized {
+			t.Fatalf("got status %d, want %d", he.Code, http.StatusUnauthorized)
+		}
+	})
+}
+
+func TestListMyReports_Handler(t *testing.T) {
+	signer, err := auth.NewTokenSigner("test-secret", 0)
+	if err != nil {
+		t.Fatalf("NewTokenSigner: %v", err)
+	}
+
+	caller := &model.Employee{
+		ID:               "emp-1",
+		Name:             "Alice",
+		OrganizationName: "Acme",
+		Role:             model.RoleUser,
+		Title:            "Manager",
+		Email:            "alice@example.com",
+	}
+
+	// setClaims signs+verifies a token for the given employee and stores the
+	// resulting claims in the echo context, mimicking what the Auth middleware
+	// does on a real request.
+	setClaims := func(c *echo.Context, e *model.Employee) {
+		token, err := signer.Sign(e)
+		if err != nil {
+			t.Fatalf("Sign: %v", err)
+		}
+		claims, err := signer.Verify(token)
+		if err != nil {
+			t.Fatalf("Verify: %v", err)
+		}
+		c.Set(contextKeyUser, claims)
+	}
+
+	t.Run("success returns reportees of the caller", func(t *testing.T) {
+		reportees := []*model.Employee{
+			{ID: "emp-2", Name: "Bob", OrganizationName: "Acme", Title: "Engineer", Email: "bob@acme.com"},
+		}
+		svc := &fakeEmployeeService{
+			reporteesFn: func(_ context.Context, managerID string, _ int, _ string) ([]*model.Employee, string, error) {
+				if managerID != "emp-1" {
+					t.Fatalf("handler passed manager %q, want emp-1 (from JWT)", managerID)
+				}
+				return reportees, "", nil
+			},
+		}
+		h := NewEmployeeHandler(svc, signer, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/me/reports", nil)
+		rec := httptest.NewRecorder()
+
+		e := echo.New()
+		c := e.NewContext(req, rec)
+		setClaims(c, caller)
+
+		if err := h.ListMyReports(c); err != nil {
+			t.Fatalf("ListMyReports: unexpected error: %v", err)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("got status %d, want %d", rec.Code, http.StatusOK)
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, `"employees":[`) {
+			t.Fatalf("response missing employees array: %s", body)
+		}
+		if !strings.Contains(body, `"id":"emp-2"`) {
+			t.Fatalf("response missing reportee id: %s", body)
+		}
+	})
+
+	t.Run("empty result returns empty array, not null", func(t *testing.T) {
+		svc := &fakeEmployeeService{
+			reporteesFn: func(_ context.Context, _ string, _ int, _ string) ([]*model.Employee, string, error) {
+				return []*model.Employee{}, "", nil
+			},
+		}
+		h := NewEmployeeHandler(svc, signer, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/me/reports", nil)
+		rec := httptest.NewRecorder()
+
+		e := echo.New()
+		c := e.NewContext(req, rec)
+		setClaims(c, caller)
+
+		if err := h.ListMyReports(c); err != nil {
+			t.Fatalf("ListMyReports: unexpected error: %v", err)
+		}
+		if !strings.Contains(rec.Body.String(), `"employees":[]`) {
+			t.Fatalf("expected empty employees array, got %s", rec.Body.String())
+		}
+	})
+
+	t.Run("limit and cursor reach the service", func(t *testing.T) {
+		var gotLimit int
+		var gotCursor string
+		svc := &fakeEmployeeService{
+			reporteesFn: func(_ context.Context, _ string, limit int, cursorID string) ([]*model.Employee, string, error) {
+				gotLimit = limit
+				gotCursor = cursorID
+				return []*model.Employee{}, "", nil
+			},
+		}
+		h := NewEmployeeHandler(svc, signer, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/me/reports?limit=5&cursor=emp-2", nil)
+		rec := httptest.NewRecorder()
+
+		e := echo.New()
+		c := e.NewContext(req, rec)
+		setClaims(c, caller)
+
+		if err := h.ListMyReports(c); err != nil {
+			t.Fatalf("ListMyReports: unexpected error: %v", err)
+		}
+		if gotLimit != 5 {
+			t.Fatalf("handler passed limit %d, want 5", gotLimit)
+		}
+		if gotCursor != "emp-2" {
+			t.Fatalf("handler passed cursor %q, want emp-2", gotCursor)
+		}
+	})
+
+	t.Run("unknown cursor maps to 400", func(t *testing.T) {
+		svc := &fakeEmployeeService{
+			reporteesFn: func(_ context.Context, _ string, _ int, _ string) ([]*model.Employee, string, error) {
+				return nil, "", apperror.ErrEmployeeNotFound
+			},
+		}
+		h := NewEmployeeHandler(svc, signer, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/me/reports?cursor=ghost", nil)
+		rec := httptest.NewRecorder()
+
+		e := echo.New()
+		c := e.NewContext(req, rec)
+		setClaims(c, caller)
+
+		err := h.ListMyReports(c)
+		he, ok := err.(*echo.HTTPError)
+		if !ok {
+			t.Fatalf("expected *echo.HTTPError, got %T: %v", err, err)
+		}
+		if he.Code != http.StatusBadRequest {
+			t.Fatalf("got status %d, want %d", he.Code, http.StatusBadRequest)
+		}
+		if he.Message != "unknown cursor" {
+			t.Fatalf("expected message %q, got %v", "unknown cursor", he.Message)
+		}
+	})
+
+	t.Run("no token is unauthorized", func(t *testing.T) {
+		svc := &fakeEmployeeService{}
+		h := NewEmployeeHandler(svc, signer, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/me/reports", nil)
+		rec := httptest.NewRecorder()
+
+		e := echo.New()
+		c := e.NewContext(req, rec)
+
+		err := h.ListMyReports(c)
+		he, ok := err.(*echo.HTTPError)
+		if !ok {
+			t.Fatalf("expected *echo.HTTPError, got %T: %v", err, err)
+		}
+		if he.Code != http.StatusUnauthorized {
+			t.Fatalf("got status %d, want %d", he.Code, http.StatusUnauthorized)
 		}
 	})
 }

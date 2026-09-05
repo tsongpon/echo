@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 
@@ -32,6 +33,7 @@ type EmployeeRepository interface {
 	GetByID(ctx context.Context, id string) (*model.Employee, error)
 	Update(ctx context.Context, employee *model.Employee) (*model.Employee, error)
 	ListByOrganization(ctx context.Context, organizationName string, limit int, cursorID string) ([]*model.Employee, string, error)
+	ListByManager(ctx context.Context, managerID string, limit int, cursorID string) ([]*model.Employee, string, error)
 }
 
 // EmployeeService is the application layer that orchestrates employee
@@ -249,4 +251,196 @@ func (s *EmployeeService) VerifyEmail(ctx context.Context, token string) error {
 		return err
 	}
 	return nil
+}
+
+// maxManagerChainHops caps the manager-chain walk performed by AssignManager
+// to detect (or defend against) management cycles. Each hop is one document
+// read, so the cap bounds the worst-case cost of an assignment on an org
+// chart that is already corrupt (e.g. a pre-existing cycle written before
+// this check existed). Any realistic org chart is far shallower than this.
+const maxManagerChainHops = 50
+
+// AssignManager sets (or, when managerID is nil, clears) the manager of the
+// target employee. Only org admins may assign, and the target and the new
+// manager must belong to the caller's organization.
+//
+// Authorization is a fresh-load check, not a JWT-claims check: the caller is
+// loaded by ID here so a stale token (issued before a role or organization
+// change) cannot grant privileges the caller no longer has.
+//
+// Validation and error mapping:
+//   - caller must exist (ErrEmployeeNotFound, 404) and be an org admin
+//     (ErrForbidden, 403).
+//   - target must exist (ErrEmployeeNotFound, 404) and belong to the caller's
+//     organization (ErrForbidden, 403).
+//   - when assigning (managerID non-nil), the new manager must exist
+//     (ErrInvalidEmployee, 400), belong to the same organization
+//     (ErrInvalidEmployee, 400), and not be the target itself (ErrInvalidEmployee,
+//     400 — a self-assignment is a one-node cycle).
+//   - the assignment must not create a management cycle: the manager chain
+//     starting at the new manager is walked (one read per hop, capped at
+//     maxManagerChainHops) and must not reach the target (ErrInvalidEmployee,
+//     400). Exceeding the hop cap is reported the same way: the chain is
+//     either cyclic already or implausibly deep, and either way the
+//     assignment is refused rather than risk closing a loop.
+//   - clearing the manager (managerID nil) skips manager validation and the
+//     cycle walk: removing a parent pointer cannot create a cycle.
+//
+// The cycle walk runs before the write but outside the update transaction, so
+// two concurrent assignments could in principle interleave and jointly create
+// a cycle. The window is milliseconds, requires an admin racing itself, and
+// the repository's optimistic-concurrency check narrows it further; the
+// residual risk is accepted.
+func (s *EmployeeService) AssignManager(ctx context.Context, callerID, targetID string, managerID *string) (*model.Employee, error) {
+	if strings.TrimSpace(callerID) == "" {
+		s.logger.Warn("manager assignment rejected: missing caller_id", "target_id", targetID)
+		return nil, apperror.ErrInvalidEmployee("caller_id is required")
+	}
+	if strings.TrimSpace(targetID) == "" {
+		s.logger.Warn("manager assignment rejected: missing target_id", "caller_id", callerID)
+		return nil, apperror.ErrInvalidEmployee("target_id is required")
+	}
+
+	caller, err := s.repo.GetByID(ctx, callerID)
+	if err != nil {
+		if errors.Is(err, apperror.ErrEmployeeNotFound) {
+			s.logger.Warn("manager assignment rejected: caller not found", "caller_id", callerID, "target_id", targetID)
+			return nil, apperror.ErrForbidden
+		}
+		s.logger.Error("manager assignment aborted: caller lookup failed", "error", err, "caller_id", callerID)
+		return nil, err
+	}
+	if caller.Role != model.RoleOrgAdmin {
+		s.logger.Warn("manager assignment rejected: caller is not an org admin",
+			"caller_id", callerID, "target_id", targetID, "role", string(caller.Role))
+		return nil, apperror.ErrForbidden
+	}
+
+	target, err := s.repo.GetByID(ctx, targetID)
+	if err != nil {
+		if errors.Is(err, apperror.ErrEmployeeNotFound) {
+			s.logger.Warn("manager assignment rejected: target not found", "caller_id", callerID, "target_id", targetID)
+			return nil, err
+		}
+		s.logger.Error("manager assignment aborted: target lookup failed", "error", err, "target_id", targetID)
+		return nil, err
+	}
+	if target.OrganizationName != caller.OrganizationName {
+		s.logger.Warn("manager assignment rejected: target in another organization",
+			"caller_id", callerID, "target_id", targetID,
+			"caller_org", caller.OrganizationName, "target_org", target.OrganizationName)
+		return nil, apperror.ErrForbidden
+	}
+
+	if managerID != nil {
+		if strings.TrimSpace(*managerID) == "" {
+			s.logger.Warn("manager assignment rejected: empty manager_id", "caller_id", callerID, "target_id", targetID)
+			return nil, apperror.ErrInvalidEmployee("manager_id must not be empty")
+		}
+		if *managerID == targetID {
+			s.logger.Warn("manager assignment rejected: self-assignment", "caller_id", callerID, "target_id", targetID)
+			return nil, apperror.ErrInvalidEmployee("manager cannot be the employee themselves")
+		}
+		manager, err := s.repo.GetByID(ctx, *managerID)
+		if err != nil {
+			if errors.Is(err, apperror.ErrEmployeeNotFound) {
+				s.logger.Warn("manager assignment rejected: manager not found", "caller_id", callerID, "target_id", targetID, "manager_id", *managerID)
+				return nil, apperror.ErrInvalidEmployee("manager_id does not refer to an existing employee")
+			}
+			s.logger.Error("manager assignment aborted: manager lookup failed", "error", err, "manager_id", *managerID)
+			return nil, err
+		}
+		if manager.OrganizationName != caller.OrganizationName {
+			s.logger.Warn("manager assignment rejected: manager in another organization",
+				"caller_id", callerID, "target_id", targetID, "manager_id", *managerID,
+				"caller_org", caller.OrganizationName, "manager_org", manager.OrganizationName)
+			return nil, apperror.ErrInvalidEmployee("manager_id must refer to an employee in the same organization")
+		}
+		if err := s.detectManagerCycle(ctx, targetID, manager); err != nil {
+			return nil, err
+		}
+	}
+
+	target.ManagerID = managerID
+	updated, err := s.repo.Update(ctx, target)
+	if err != nil {
+		s.logger.Error("manager assignment aborted: repository update failed",
+			"error", err, "caller_id", callerID, "target_id", targetID)
+		return nil, err
+	}
+	return updated, nil
+}
+
+// detectManagerCycle walks the manager chain upward starting at manager and
+// reports a validation error if assigning manager as the parent of targetID
+// would create a cycle — i.e. if the chain reaches targetID before reaching
+// the top of the org chart. The walk is capped at maxManagerChainHops to bound
+// both its cost and its termination on chains that are already cyclic or
+// implausibly deep.
+func (s *EmployeeService) detectManagerCycle(ctx context.Context, targetID string, manager *model.Employee) error {
+	current := manager
+	for hops := 0; hops < maxManagerChainHops && current != nil; hops++ {
+		if current.ID == targetID {
+			s.logger.Warn("manager assignment rejected: would create a management cycle",
+				"target_id", targetID, "manager_id", manager.ID, "hops", hops)
+			return apperror.ErrInvalidEmployee("assignment would create a management cycle")
+		}
+		if current.ManagerID == nil {
+			// Reached the top of the chain without seeing the target.
+			return nil
+		}
+		next, err := s.repo.GetByID(ctx, *current.ManagerID)
+		if err != nil {
+			if errors.Is(err, apperror.ErrEmployeeNotFound) {
+				// A dangling manager pointer. It cannot close a cycle back to
+				// the target, so the assignment is allowed; the chain is
+				// simply broken higher up.
+				s.logger.Warn("manager chain walk hit a dangling manager_id",
+					"target_id", targetID, "manager_id", manager.ID, "dangling_id", *current.ManagerID)
+				return nil
+			}
+			s.logger.Error("manager chain walk aborted: lookup failed",
+				"error", err, "manager_id", *current.ManagerID)
+			return err
+		}
+		current = next
+	}
+	s.logger.Warn("manager assignment rejected: manager chain exceeded the hop cap",
+		"target_id", targetID, "manager_id", manager.ID, "hop_cap", maxManagerChainHops)
+	return apperror.ErrInvalidEmployee("manager chain is too deep or already cyclic")
+}
+
+// ListReportees returns one page of employees whose manager is the named
+// employee, ordered by name ascending, plus the ID of the last employee on
+// the page for use as the next page's cursor. The manager ID is taken from the
+// authenticated caller's JWT by the handler, so an employee can only list
+// their own reportees.
+//
+// limit is the page size; if <= 0 DefaultEmployeeListLimit is used, and it is
+// capped at MaxEmployeeListLimit. cursorID is the ID of the last employee from
+// the previous page; an empty cursorID starts a new listing from the
+// beginning. The returned nextCursorID is empty when there are no more pages.
+func (s *EmployeeService) ListReportees(ctx context.Context, managerID string, limit int, cursorID string) ([]*model.Employee, string, error) {
+	if strings.TrimSpace(managerID) == "" {
+		s.logger.Warn("reportee list rejected: missing manager_id")
+		return nil, "", apperror.ErrInvalidEmployee("manager_id is required")
+	}
+	if limit <= 0 {
+		limit = DefaultEmployeeListLimit
+	}
+	if limit > MaxEmployeeListLimit {
+		limit = MaxEmployeeListLimit
+	}
+
+	employees, nextCursorID, err := s.repo.ListByManager(ctx, managerID, limit, cursorID)
+	if err != nil {
+		if errors.Is(err, apperror.ErrEmployeeNotFound) {
+			// An unknown cursor is a caller error, not a service failure.
+			// Pass it through so the handler can map it to a 400.
+			return nil, "", err
+		}
+		s.logger.Error("reportee list failed", "error", err, "manager_id", managerID, "limit", limit, "cursor_id", cursorID)
+		return nil, "", err
+	}
+	return employees, nextCursorID, nil
 }

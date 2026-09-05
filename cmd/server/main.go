@@ -117,7 +117,7 @@ func main() {
 	feedbackPeriodService := service.NewFeedbackPeriodService(feedbackPeriodRepo, nil)
 	feedbackPeriodHandler := handler.NewFeedbackPeriodHandler(feedbackPeriodService, nil)
 	feedbackRepo := repository.NewFeedbackFirestoreRepository(firestoreClient, nil)
-	feedbackService := service.NewFeedbackService(feedbackRepo, feedbackPeriodRepo, nil)
+	feedbackService := service.NewFeedbackService(feedbackRepo, feedbackPeriodRepo, employeeRepo, nil)
 	feedbackHandler := handler.NewFeedbackHandler(feedbackService, nil)
 
 	e.GET("/ping", func(c *echo.Context) error {
@@ -139,6 +139,9 @@ func main() {
 	e.GET("/v1/feedback-periods", feedbackPeriodHandler.ListFeedbackPeriods, handler.Auth(tokenSigner))
 	e.POST("/v1/feedbacks", feedbackHandler.CreateFeedback, handler.Auth(tokenSigner))
 	e.GET("/v1/me/feedbacks", feedbackHandler.ListMyFeedbacks, handler.Auth(tokenSigner))
+	e.GET("/v1/me/reports", employeeHandler.ListMyReports, handler.Auth(tokenSigner))
+	e.PATCH("/v1/employees/:id/manager", employeeHandler.AssignManager, handler.Auth(tokenSigner))
+	e.GET("/v1/employees/:id/feedbacks", feedbackHandler.ListEmployeeFeedbacks, handler.Auth(tokenSigner))
 
 	if err := e.Start(":" + port); err != nil {
 		slog.Error("failed to start server", "error", err)

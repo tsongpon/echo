@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -92,6 +93,56 @@ func (f *fakeRepo) ListByOrganization(_ context.Context, organizationName string
 	})
 	// Find the cursor position; an unknown cursor mirrors the repo's
 	// apperror.ErrEmployeeNotFound so the service test can exercise that path.
+	start := 0
+	if strings.TrimSpace(cursorID) != "" {
+		found := -1
+		for i, e := range all {
+			if e.ID == cursorID {
+				found = i
+				break
+			}
+		}
+		if found == -1 {
+			return nil, "", apperror.ErrEmployeeNotFound
+		}
+		start = found + 1
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	end := start + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	page := all[start:end]
+	if page == nil {
+		page = []*model.Employee{}
+	}
+	nextCursor := ""
+	if end < len(all) {
+		nextCursor = page[len(page)-1].ID
+	}
+	return page, nextCursor, nil
+}
+
+// ListByManager mirrors service.EmployeeRepository.ListByManager. It serves
+// from the in-memory byID map, filtering by manager_id and sorting by name
+// ascending then by ID, mirroring Firestore's ordering on (name, document
+// ID). An unknown cursor returns apperror.ErrEmployeeNotFound, matching the
+// real Firestore repository.
+func (f *fakeRepo) ListByManager(_ context.Context, managerID string, limit int, cursorID string) ([]*model.Employee, string, error) {
+	var all []*model.Employee
+	for _, e := range f.byID {
+		if e.ManagerID != nil && *e.ManagerID == managerID {
+			all = append(all, e)
+		}
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].Name != all[j].Name {
+			return all[i].Name < all[j].Name
+		}
+		return all[i].ID < all[j].ID
+	})
 	start := 0
 	if strings.TrimSpace(cursorID) != "" {
 		found := -1
@@ -754,6 +805,9 @@ func (e *erroringRepo) Update(_ context.Context, emp *model.Employee) (*model.Em
 func (e *erroringRepo) ListByOrganization(_ context.Context, _ string, _ int, _ string) ([]*model.Employee, string, error) {
 	return nil, "", e.err
 }
+func (e *erroringRepo) ListByManager(_ context.Context, _ string, _ int, _ string) ([]*model.Employee, string, error) {
+	return nil, "", e.err
+}
 
 // testSigner builds an EmailVerificationTokenSigner for service tests.
 func testSigner(t *testing.T, ttl time.Duration) *auth.EmailVerificationTokenSigner {
@@ -893,6 +947,335 @@ func TestVerifyEmail(t *testing.T) {
 
 		if err := svc.VerifyEmail(context.Background(), token); !errors.Is(err, apperror.ErrInvalidVerificationToken) {
 			t.Fatalf("expected apperror.ErrInvalidVerificationToken, got %v", err)
+		}
+	})
+}
+
+// newAssignTestService builds an EmployeeService over a fakeRepo seeded with
+// the org chart the AssignManager tests need, and returns the service plus
+// the seeded employees. The caller is always an org admin in "org-1".
+func newAssignTestService(t *testing.T) (*EmployeeService, *fakeRepo, map[string]*model.Employee) {
+	t.Helper()
+	signer, err := auth.NewEmailVerificationTokenSigner("test-secret", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invSigner, err := auth.NewInvitationTokenSigner("test-secret", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	repo := &fakeRepo{
+		byEmail: make(map[string]*model.Employee),
+		byID:    make(map[string]*model.Employee),
+	}
+	people := map[string]*model.Employee{
+		"admin":  {ID: "id-admin", Name: "Admin", OrganizationName: "org-1", Role: model.RoleOrgAdmin, Email: "admin@example.com"},
+		"alice":  {ID: "id-alice", Name: "Alice", OrganizationName: "org-1", Role: model.RoleUser, Email: "alice@example.com"},
+		"bob":    {ID: "id-bob", Name: "Bob", OrganizationName: "org-1", Role: model.RoleUser, Email: "bob@example.com"},
+		"carol":  {ID: "id-carol", Name: "Carol", OrganizationName: "org-1", Role: model.RoleUser, Email: "carol@example.com"},
+		"dave":   {ID: "id-dave", Name: "Dave", OrganizationName: "org-1", Role: model.RoleUser, Email: "dave@example.com"},
+		"outsider": {ID: "id-outsider", Name: "Outsider", OrganizationName: "org-2", Role: model.RoleOrgAdmin, Email: "outsider@example.com"},
+	}
+	for _, e := range people {
+		repo.byID[e.ID] = e
+		repo.byEmail[e.Email] = e
+	}
+
+	svc := NewEmployeeService(repo, &noopMailer{}, signer, invSigner, logger)
+	return svc, repo, people
+}
+
+func TestAssignManager(t *testing.T) {
+	t.Run("happy path assigns manager", func(t *testing.T) {
+		svc, _, people := newAssignTestService(t)
+
+		updated, err := svc.AssignManager(context.Background(), people["admin"].ID, people["carol"].ID, &people["bob"].ID)
+		if err != nil {
+			t.Fatalf("AssignManager: %v", err)
+		}
+		if updated.ManagerID == nil || *updated.ManagerID != people["bob"].ID {
+			t.Fatalf("expected carol's manager_id to be %q, got %+v", people["bob"].ID, updated.ManagerID)
+		}
+		// The persisted record must reflect the assignment too.
+		stored := people["carol"]
+		if stored.ManagerID == nil || *stored.ManagerID != people["bob"].ID {
+			t.Fatalf("expected stored carol manager_id to be %q, got %+v", people["bob"].ID, stored.ManagerID)
+		}
+	})
+
+	t.Run("unassign clears manager", func(t *testing.T) {
+		svc, _, people := newAssignTestService(t)
+		bobID := people["bob"].ID
+		if _, err := svc.AssignManager(context.Background(), people["admin"].ID, people["carol"].ID, &bobID); err != nil {
+			t.Fatalf("assign: %v", err)
+		}
+
+		updated, err := svc.AssignManager(context.Background(), people["admin"].ID, people["carol"].ID, nil)
+		if err != nil {
+			t.Fatalf("AssignManager(nil): %v", err)
+		}
+		if updated.ManagerID != nil {
+			t.Fatalf("expected carol's manager_id to be nil, got %q", *updated.ManagerID)
+		}
+	})
+
+	t.Run("non-admin caller is forbidden", func(t *testing.T) {
+		svc, _, people := newAssignTestService(t)
+
+		_, err := svc.AssignManager(context.Background(), people["alice"].ID, people["carol"].ID, &people["bob"].ID)
+		if !errors.Is(err, apperror.ErrForbidden) {
+			t.Fatalf("expected ErrForbidden for non-admin caller, got %v", err)
+		}
+	})
+
+	t.Run("unknown caller is forbidden", func(t *testing.T) {
+		svc, _, people := newAssignTestService(t)
+
+		_, err := svc.AssignManager(context.Background(), "id-ghost", people["carol"].ID, &people["bob"].ID)
+		if !errors.Is(err, apperror.ErrForbidden) {
+			t.Fatalf("expected ErrForbidden for unknown caller, got %v", err)
+		}
+	})
+
+	t.Run("unknown target is not found", func(t *testing.T) {
+		svc, _, people := newAssignTestService(t)
+
+		_, err := svc.AssignManager(context.Background(), people["admin"].ID, "id-ghost", &people["bob"].ID)
+		if !errors.Is(err, apperror.ErrEmployeeNotFound) {
+			t.Fatalf("expected ErrEmployeeNotFound for unknown target, got %v", err)
+		}
+	})
+
+	t.Run("cross-org target is forbidden", func(t *testing.T) {
+		svc, _, people := newAssignTestService(t)
+
+		_, err := svc.AssignManager(context.Background(), people["admin"].ID, people["outsider"].ID, &people["bob"].ID)
+		if !errors.Is(err, apperror.ErrForbidden) {
+			t.Fatalf("expected ErrForbidden for cross-org target, got %v", err)
+		}
+	})
+
+	t.Run("unknown manager is invalid", func(t *testing.T) {
+		svc, _, people := newAssignTestService(t)
+		ghost := "id-ghost"
+
+		_, err := svc.AssignManager(context.Background(), people["admin"].ID, people["carol"].ID, &ghost)
+		if !apperror.IsInvalidEmployee(err) {
+			t.Fatalf("expected ErrInvalidEmployee for unknown manager, got %v", err)
+		}
+	})
+
+	t.Run("cross-org manager is invalid", func(t *testing.T) {
+		svc, _, people := newAssignTestService(t)
+		outsider := people["outsider"].ID
+
+		_, err := svc.AssignManager(context.Background(), people["admin"].ID, people["carol"].ID, &outsider)
+		if !apperror.IsInvalidEmployee(err) {
+			t.Fatalf("expected ErrInvalidEmployee for cross-org manager, got %v", err)
+		}
+	})
+
+	t.Run("self-assignment is invalid", func(t *testing.T) {
+		svc, _, people := newAssignTestService(t)
+		carol := people["carol"].ID
+
+		_, err := svc.AssignManager(context.Background(), people["admin"].ID, carol, &carol)
+		if !apperror.IsInvalidEmployee(err) {
+			t.Fatalf("expected ErrInvalidEmployee for self-assignment, got %v", err)
+		}
+	})
+
+	t.Run("direct cycle is rejected", func(t *testing.T) {
+		svc, _, people := newAssignTestService(t)
+		// bob's manager is carol; assigning carol's manager = bob would
+		// create bob -> carol -> bob.
+		carol := people["carol"].ID
+		if _, err := svc.AssignManager(context.Background(), people["admin"].ID, people["bob"].ID, &carol); err != nil {
+			t.Fatalf("seed assign: %v", err)
+		}
+
+		bob := people["bob"].ID
+		_, err := svc.AssignManager(context.Background(), people["admin"].ID, carol, &bob)
+		if !apperror.IsInvalidEmployee(err) {
+			t.Fatalf("expected ErrInvalidEmployee for cycle, got %v", err)
+		}
+	})
+
+	t.Run("longer chain cycle is rejected", func(t *testing.T) {
+		svc, _, people := newAssignTestService(t)
+		// Chain: dave -> bob -> alice. Assigning alice's manager = dave
+		// would close dave -> bob -> alice -> dave.
+		alice := people["alice"].ID
+		bob := people["bob"].ID
+		dave := people["dave"].ID
+		ctx := context.Background()
+		if _, err := svc.AssignManager(ctx, people["admin"].ID, bob, &alice); err != nil {
+			t.Fatalf("seed bob->alice: %v", err)
+		}
+		if _, err := svc.AssignManager(ctx, people["admin"].ID, dave, &bob); err != nil {
+			t.Fatalf("seed dave->bob: %v", err)
+		}
+
+		_, err := svc.AssignManager(ctx, people["admin"].ID, alice, &dave)
+		if !apperror.IsInvalidEmployee(err) {
+			t.Fatalf("expected ErrInvalidEmployee for longer-chain cycle, got %v", err)
+		}
+	})
+
+	t.Run("deep valid chain within cap is allowed", func(t *testing.T) {
+		svc, repo, _ := newAssignTestService(t)
+		ctx := context.Background()
+
+		// Build a chain of 10 employees under alice; then assign alice's
+		// manager = carol. The walk from carol is short, so this must pass.
+		prev := "id-alice"
+		for i := 0; i < 10; i++ {
+			id := "id-chain-" + strconv.Itoa(i)
+			e := &model.Employee{ID: id, Name: "Chain" + strconv.Itoa(i), OrganizationName: "org-1", Role: model.RoleUser, Email: "chain" + strconv.Itoa(i) + "@example.com"}
+			repo.byID[id] = e
+			mgr := prev
+			e.ManagerID = &mgr
+			prev = id
+		}
+		carol := "id-carol"
+		if _, err := svc.AssignManager(ctx, "id-admin", carol, &prev); err != nil {
+			t.Fatalf("expected deep-but-valid chain assignment to succeed, got %v", err)
+		}
+	})
+
+	t.Run("chain exceeding hop cap is rejected", func(t *testing.T) {
+		svc, repo, _ := newAssignTestService(t)
+		ctx := context.Background()
+
+		// Build a pre-existing cycle among chain employees (loop of 60, none
+		// of them the target); assigning a member of that loop as the target's
+		// manager must hit the hop cap and be rejected.
+		const n = 60
+		for i := 0; i < n; i++ {
+			id := "id-loop-" + strconv.Itoa(i)
+			next := "id-loop-" + strconv.Itoa((i+1)%n)
+			e := &model.Employee{ID: id, Name: "Loop" + strconv.Itoa(i), OrganizationName: "org-1", Role: model.RoleUser, Email: "loop" + strconv.Itoa(i) + "@example.com"}
+			e.ManagerID = &next
+			repo.byID[id] = e
+		}
+		loop0 := "id-loop-0"
+
+		_, err := svc.AssignManager(ctx, "id-admin", "id-carol", &loop0)
+		if !apperror.IsInvalidEmployee(err) {
+			t.Fatalf("expected ErrInvalidEmployee for hop-cap violation, got %v", err)
+		}
+	})
+
+	t.Run("missing caller id is invalid", func(t *testing.T) {
+		svc, _, people := newAssignTestService(t)
+
+		_, err := svc.AssignManager(context.Background(), "", people["carol"].ID, &people["bob"].ID)
+		if !apperror.IsInvalidEmployee(err) {
+			t.Fatalf("expected ErrInvalidEmployee for missing caller, got %v", err)
+		}
+	})
+
+	t.Run("missing target id is invalid", func(t *testing.T) {
+		svc, _, people := newAssignTestService(t)
+
+		_, err := svc.AssignManager(context.Background(), people["admin"].ID, "", &people["bob"].ID)
+		if !apperror.IsInvalidEmployee(err) {
+			t.Fatalf("expected ErrInvalidEmployee for missing target, got %v", err)
+		}
+	})
+}
+
+func TestListReportees(t *testing.T) {
+	t.Run("returns only direct reportees", func(t *testing.T) {
+		svc, _, people := newAssignTestService(t)
+		ctx := context.Background()
+
+		// carol has two direct reportees; bob also reports to carol.
+		for _, target := range []string{"id-alice", "id-bob", "id-dave"} {
+			carol := "id-carol"
+			if _, err := svc.AssignManager(ctx, people["admin"].ID, target, &carol); err != nil {
+				t.Fatalf("seed assign %s: %v", target, err)
+			}
+		}
+
+		got, nextCursor, err := svc.ListReportees(ctx, "id-carol", 0, "")
+		if err != nil {
+			t.Fatalf("ListReportees: %v", err)
+		}
+		if nextCursor != "" {
+			t.Fatalf("expected no next cursor, got %q", nextCursor)
+		}
+		if len(got) != 3 {
+			t.Fatalf("expected 3 reportees, got %d", len(got))
+		}
+		// Ordered by name ascending: Alice, Bob, Dave.
+		wantNames := []string{"Alice", "Bob", "Dave"}
+		for i, want := range wantNames {
+			if got[i].Name != want {
+				t.Fatalf("reportee[%d]: got name %q, want %q", i, got[i].Name, want)
+			}
+		}
+	})
+
+	t.Run("paginates via cursor", func(t *testing.T) {
+		svc, _, people := newAssignTestService(t)
+		ctx := context.Background()
+		carol := "id-carol"
+		for _, target := range []string{"id-alice", "id-bob", "id-dave"} {
+			if _, err := svc.AssignManager(ctx, people["admin"].ID, target, &carol); err != nil {
+				t.Fatalf("seed assign %s: %v", target, err)
+			}
+		}
+
+		page1, cursor, err := svc.ListReportees(ctx, "id-carol", 2, "")
+		if err != nil {
+			t.Fatalf("page 1: %v", err)
+		}
+		if len(page1) != 2 || cursor == "" {
+			t.Fatalf("expected 2 reportees and a cursor, got %d and %q", len(page1), cursor)
+		}
+
+		page2, cursor2, err := svc.ListReportees(ctx, "id-carol", 2, cursor)
+		if err != nil {
+			t.Fatalf("page 2: %v", err)
+		}
+		if len(page2) != 1 || cursor2 != "" {
+			t.Fatalf("expected 1 reportee and no cursor, got %d and %q", len(page2), cursor2)
+		}
+		if page2[0].Name != "Dave" {
+			t.Fatalf("expected Dave on page 2, got %q", page2[0].Name)
+		}
+	})
+
+	t.Run("unknown cursor is employee-not-found", func(t *testing.T) {
+		svc, _, _ := newAssignTestService(t)
+
+		_, _, err := svc.ListReportees(context.Background(), "id-carol", 0, "id-ghost")
+		if !errors.Is(err, apperror.ErrEmployeeNotFound) {
+			t.Fatalf("expected ErrEmployeeNotFound for unknown cursor, got %v", err)
+		}
+	})
+
+	t.Run("no reportees yields empty page", func(t *testing.T) {
+		svc, _, _ := newAssignTestService(t)
+
+		got, nextCursor, err := svc.ListReportees(context.Background(), "id-alice", 0, "")
+		if err != nil {
+			t.Fatalf("ListReportees: %v", err)
+		}
+		if len(got) != 0 || nextCursor != "" {
+			t.Fatalf("expected empty page with no cursor, got %d and %q", len(got), nextCursor)
+		}
+	})
+
+	t.Run("missing manager id is invalid", func(t *testing.T) {
+		svc, _, _ := newAssignTestService(t)
+
+		_, _, err := svc.ListReportees(context.Background(), "", 0, "")
+		if !apperror.IsInvalidEmployee(err) {
+			t.Fatalf("expected ErrInvalidEmployee for missing manager, got %v", err)
 		}
 	})
 }

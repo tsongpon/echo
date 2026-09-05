@@ -521,6 +521,206 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /v1/employees/{id}/manager:
+    patch:
+      tags: [Employees]
+      summary: Assign or clear an employee's manager
+      description: |
+        Sets (or, when `manager_id` is `null`, clears) the manager of the named
+        employee. Only org admins may do this; the check is a fresh-load check
+        server-side, so a stale token cannot grant privileges the caller no
+        longer has. The target and the new manager must belong to the caller's
+        organization.
+
+        Validation: the new manager must exist, be in the same organization,
+        not be the target themselves, and the assignment must not create a
+        management cycle (the manager chain is walked server-side, capped at
+        50 hops; a longer or already-cyclic chain is rejected). Clearing the
+        manager (`manager_id: null`) skips these checks: removing a parent
+        pointer cannot create a cycle.
+      operationId: assignManager
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The employee ID whose manager is being assigned.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssignManagerRequest"
+            examples:
+              assign:
+                summary: Assign a manager
+                value:
+                  manager_id: 0190aaaa-0001-7000-8000-000000000000
+              clear:
+                summary: Clear the manager
+                value:
+                  manager_id: null
+      responses:
+        "200":
+          description: The updated employee, with the new `manager_id`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmployeeResponse"
+        "400":
+          description: |
+            Malformed body or a failed validation (unknown manager ID,
+            cross-org manager, self-assignment, or a would-be cycle).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                cycle:
+                  value: { message: "assignment would create a management cycle" }
+                unknownManager:
+                  value: { message: "manager_id does not refer to an existing employee" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Caller is not an org admin, or the target is in another organization.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                notAdmin:
+                  value: { message: "only org admins can assign managers within their organization" }
+        "404":
+          description: No employee matches the target ID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                notFound:
+                  value: { message: "employee not found" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/me/reports:
+    get:
+      tags: [Employees]
+      summary: List the current employee's direct reportees
+      description: |
+        Returns one page of employees whose `manager_id` is the authenticated
+        caller (i.e. the caller's direct reportees), ordered by name ascending.
+        The manager is the authenticated employee (taken from the JWT subject),
+        so an employee can only list their own reportees. An employee with no
+        reportees gets an empty list. The response omits the `password` field.
+
+        Pagination is cursor-based: pass the `next_cursor` value from one
+        response as the `cursor` query parameter on the next request. When
+        `next_cursor` is `null` there are no more pages. An unknown cursor
+        (one that does not refer to an existing employee) returns `400`.
+      operationId: listMyReports
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ListLimit"
+        - $ref: "#/components/parameters/ListCursor"
+      responses:
+        "200":
+          description: One page of reportees plus the next-page cursor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmployeeListResponse"
+        "400":
+          description: Unknown cursor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                unknownCursor:
+                  value: { message: "unknown cursor" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/employees/{id}/feedbacks:
+    get:
+      tags: [Feedback]
+      summary: List feedback received by an employee (manager view)
+      description: |
+        Returns one page of feedback entries received by the named employee,
+        but only when the authenticated caller is that employee's manager.
+        Ordered by `created_at` descending (newest first). A caller who is not
+        the reviewee's manager — including the reviewee themselves — gets
+        `403`; an unknown employee ID gets `404`.
+
+        Pagination is cursor-based: pass the `next_cursor` value from one
+        response as the `cursor` query parameter on the next request. When
+        `next_cursor` is `null` there are no more pages. An unknown cursor
+        (one that does not refer to an existing feedback entry) returns `400`.
+
+        Visibility policy: identical to the reviewee's own view — for entries
+        with `visibility: "anonymous"`, `reviewer_id` is empty in the response.
+        The manager sees the same redacted view the reviewee sees. Entries
+        with `visibility: "named"` include `reviewer_id` as usual.
+      operationId: listEmployeeFeedbacks
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The employee ID whose received feedback is being listed.
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/ListLimit"
+        - $ref: "#/components/parameters/ListCursor"
+      responses:
+        "200":
+          description: One page of received feedback plus the next-page cursor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackListResponse"
+        "400":
+          description: Unknown cursor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                unknownCursor:
+                  value: { message: "unknown cursor" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: The caller is not the named employee's manager.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                notManager:
+                  value: { message: "only the employee's manager can view their feedback" }
+        "404":
+          description: No employee matches the ID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                notFound:
+                  value: { message: "employee not found" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+
 # ----------------------------------------------------------------------------
 # Components
 # ----------------------------------------------------------------------------
@@ -761,6 +961,23 @@ components:
             first admin). If a valid invitation token is supplied, `role: "user"`.
           default: ""
       required: [name, organization_name, email, password]
+
+    AssignManagerRequest:
+      type: object
+      description: Request body for `PATCH /v1/employees/{id}/manager`.
+      properties:
+        manager_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            The employee ID to assign as the target's manager, or `null` to
+            clear the assignment. The manager must exist, belong to the same
+            organization as the caller, not be the target themselves, and not
+            create a management cycle; `null` skips these checks.
+      required: [manager_id]
+      example:
+        manager_id: 0190aaaa-0001-7000-8000-000000000000
 
     LoginRequest:
       type: object

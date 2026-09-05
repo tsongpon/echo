@@ -39,26 +39,38 @@ type FeedbackPeriodLookup interface {
 	GetByID(ctx context.Context, id string) (*model.FeedbackPeriod, error)
 }
 
+// EmployeeLookup is the consumer-defined contract for resolving an employee
+// by ID. It is a subset of EmployeeRepository so the feedback service can
+// authorize the manager-view endpoint (the caller must be the reviewee's
+// manager) without depending on the full employee repository.
+type EmployeeLookup interface {
+	GetByID(ctx context.Context, id string) (*model.Employee, error)
+}
+
 // FeedbackService is the application layer that orchestrates feedback
 // operations against a FeedbackRepository. It validates that a feedback entry's
 // period_id refers to an existing feedback period via the injected
-// FeedbackPeriodLookup before persisting.
+// FeedbackPeriodLookup before persisting, and authorizes the manager-view
+// listing via the injected EmployeeLookup.
 type FeedbackService struct {
-	repo        FeedbackRepository
-	periods     FeedbackPeriodLookup
-	logger      *slog.Logger
+	repo      FeedbackRepository
+	periods   FeedbackPeriodLookup
+	employees EmployeeLookup
+	logger    *slog.Logger
 }
 
 // NewFeedbackService creates a FeedbackService backed by the given feedback
-// repository and feedback-period lookup. If logger is nil, slog.Default() is
-// used. periods may be nil to disable period-existence validation (useful in
-// tests that don't care about the period); in production it should always be
-// provided.
-func NewFeedbackService(repo FeedbackRepository, periods FeedbackPeriodLookup, logger *slog.Logger) *FeedbackService {
+// repository, feedback-period lookup, and employee lookup. If logger is nil,
+// slog.Default() is used. periods may be nil to disable period-existence
+// validation (useful in tests that don't care about the period); in production
+// it should always be provided. employees may likewise be nil in tests, but
+// ListByRevieweeForManager fails closed when it is nil (the manager-view
+// authorization cannot be performed without it).
+func NewFeedbackService(repo FeedbackRepository, periods FeedbackPeriodLookup, employees EmployeeLookup, logger *slog.Logger) *FeedbackService {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &FeedbackService{repo: repo, periods: periods, logger: logger}
+	return &FeedbackService{repo: repo, periods: periods, employees: employees, logger: logger}
 }
 
 // Create creates a new feedback entry after validating the input. The reviewer
@@ -252,4 +264,60 @@ func (s *FeedbackService) ListByReviewee(ctx context.Context, revieweeID string,
 		return nil, "", err
 	}
 	return feedbacks, nextCursorID, nil
+}
+
+// ListByRevieweeForManager returns one page of feedback entries received by
+// the named reviewee, but only when the caller is that reviewee's manager.
+// It backs the manager view of a reportee's feedback (e.g. GET
+// /v1/employees/:id/feedbacks). Pagination, ordering, and cursor semantics
+// are identical to ListByReviewee.
+//
+// Authorization is a fresh-load check: the reviewee's current manager_id
+// must equal the caller's ID. An employee who is not the reviewee's manager
+// — including the reviewee themselves — gets apperror.ErrForbidden (403)
+// rather than a 404, because the reviewee's feedback existence is not a
+// secret from their manager. An unknown reviewee ID yields 404 via
+// apperror.ErrEmployeeNotFound. When the service was constructed without an
+// EmployeeLookup the call fails closed with ErrForbidden: it cannot be
+// authorized, so it must not succeed.
+//
+// Visibility policy: as with ListByReviewee, the handler (via the DTO layer)
+// redacts reviewer_id on anonymous entries; the manager sees the same
+// redacted view the reviewee would see. This is enforced in
+// dto.ToFeedbackListResponse, not here.
+func (s *FeedbackService) ListByRevieweeForManager(ctx context.Context, callerID, revieweeID string, limit int, cursorID string) ([]*model.Feedback, string, error) {
+	if strings.TrimSpace(callerID) == "" {
+		s.logger.Warn("manager feedback list rejected: missing caller_id", "reviewee_id", revieweeID)
+		return nil, "", apperror.ErrInvalidFeedback("caller_id is required")
+	}
+	if strings.TrimSpace(revieweeID) == "" {
+		s.logger.Warn("manager feedback list rejected: missing reviewee_id", "caller_id", callerID)
+		return nil, "", apperror.ErrInvalidFeedback("reviewee_id is required")
+	}
+	if s.employees == nil {
+		// Fail closed: without an employee lookup the caller's right to see
+		// this reviewee's feedback cannot be established.
+		s.logger.Error("manager feedback list rejected: no employee lookup configured (miswired service?)",
+			"caller_id", callerID, "reviewee_id", revieweeID)
+		return nil, "", apperror.ErrForbidden
+	}
+
+	reviewee, err := s.employees.GetByID(ctx, revieweeID)
+	if err != nil {
+		if errors.Is(err, apperror.ErrEmployeeNotFound) {
+			s.logger.Warn("manager feedback list rejected: reviewee not found",
+				"caller_id", callerID, "reviewee_id", revieweeID)
+			return nil, "", err
+		}
+		s.logger.Error("manager feedback list aborted: reviewee lookup failed",
+			"error", err, "reviewee_id", revieweeID)
+		return nil, "", err
+	}
+	if reviewee.ManagerID == nil || *reviewee.ManagerID != callerID {
+		s.logger.Warn("manager feedback list rejected: caller is not the reviewee's manager",
+			"caller_id", callerID, "reviewee_id", revieweeID)
+		return nil, "", apperror.ErrForbidden
+	}
+
+	return s.ListByReviewee(ctx, revieweeID, limit, cursorID)
 }

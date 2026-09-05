@@ -25,6 +25,8 @@ type EmployeeService interface {
 	GetByID(ctx context.Context, id string) (*model.Employee, error)
 	VerifyEmail(ctx context.Context, token string) error
 	ListByOrganization(ctx context.Context, organizationName string, limit int, cursorID string) ([]*model.Employee, string, error)
+	AssignManager(ctx context.Context, callerID, targetID string, managerID *string) (*model.Employee, error)
+	ListReportees(ctx context.Context, managerID string, limit int, cursorID string) ([]*model.Employee, string, error)
 }
 
 // EmployeeHandler exposes HTTP endpoints for employee operations.
@@ -196,6 +198,108 @@ func (h *EmployeeHandler) ListEmployees(c *echo.Context) error {
 		h.logger.Error("employee list failed",
 			"error", err, "caller_id", claims.Subject, "organization_name", claims.OrganizationName, "cursor", cursorID)
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to list employees")
+	}
+
+	return c.JSON(http.StatusOK, dto.ToEmployeeListResponse(employees, nextCursorID))
+}
+
+// AssignManager handles PATCH /v1/employees/:id/manager: assigns or clears
+// the manager of the named employee. Only org admins may do this; the check
+// is a fresh-load check inside the service (not a JWT-claims check), so a
+// stale token cannot grant privileges the caller no longer has. The caller
+// is the authenticated employee (taken from the JWT subject), so the route
+// must be mounted behind the Auth middleware.
+//
+// The request body is {"manager_id": "<employee id>"} to assign, or
+// {"manager_id": null} to clear the assignment.
+func (h *EmployeeHandler) AssignManager(c *echo.Context) error {
+	claims := ClaimsFromContext(c)
+	if claims == nil {
+		// Auth middleware should have already rejected the request; this guard
+		// protects against accidental wiring without the middleware.
+		h.logger.Warn("manager assignment rejected: missing claims (route miswired?)")
+		return echo.NewHTTPError(http.StatusUnauthorized, "missing or invalid token")
+	}
+
+	var req dto.AssignManagerRequest
+	if err := c.Bind(&req); err != nil {
+		h.logger.Warn("manager assignment rejected: invalid request body",
+			"caller_id", claims.Subject, "error", err)
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+
+	updated, err := h.employees.AssignManager(c.Request().Context(), claims.Subject, c.Param("id"), req.ManagerID)
+	if err != nil {
+		switch {
+		case errors.Is(err, apperror.ErrForbidden):
+			h.logger.Warn("manager assignment rejected: forbidden",
+				"caller_id", claims.Subject, "target_id", c.Param("id"))
+			return echo.NewHTTPError(http.StatusForbidden, "only org admins can assign managers within their organization")
+		case errors.Is(err, apperror.ErrEmployeeNotFound):
+			h.logger.Warn("manager assignment rejected: target not found",
+				"caller_id", claims.Subject, "target_id", c.Param("id"))
+			return echo.NewHTTPError(http.StatusNotFound, "employee not found")
+		}
+		var invalid apperror.ErrInvalidEmployee
+		if errors.As(err, &invalid) {
+			h.logger.Warn("manager assignment rejected: validation failed",
+				"caller_id", claims.Subject, "target_id", c.Param("id"), "reason", invalid.Error())
+			return echo.NewHTTPError(http.StatusBadRequest, invalid.Error())
+		}
+		h.logger.Error("manager assignment failed",
+			"error", err, "caller_id", claims.Subject, "target_id", c.Param("id"))
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to assign manager")
+	}
+
+	return c.JSON(http.StatusOK, dto.ToEmployeeResponse(updated))
+}
+
+// ListMyReports handles GET /v1/me/reports: returns one page of the
+// authenticated employee's direct reportees (employees whose manager_id is
+// the caller), ordered by name ascending. The manager is the authenticated
+// employee (taken from the JWT subject), so the route must be mounted behind
+// the Auth middleware. Any authenticated employee may list their own
+// reportees; an employee with none gets an empty list.
+//
+// Pagination is controlled by two optional query parameters:
+//   - limit:  page size, default 20, max 100. Non-numeric or <= 0 falls back to
+//     the default; values above the max are capped.
+//   - cursor: the ID of the last employee from the previous page (the
+//     next_cursor value the client received). Omit on the first page.
+func (h *EmployeeHandler) ListMyReports(c *echo.Context) error {
+	claims := ClaimsFromContext(c)
+	if claims == nil {
+		// Auth middleware should have already rejected the request; this guard
+		// protects against accidental wiring without the middleware.
+		h.logger.Warn("reportee list rejected: missing claims (route miswired?)")
+		return echo.NewHTTPError(http.StatusUnauthorized, "missing or invalid token")
+	}
+
+	limit := 0
+	if raw := c.QueryParam("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			limit = n
+		}
+	}
+	cursorID := c.QueryParam("cursor")
+
+	employees, nextCursorID, err := h.employees.ListReportees(c.Request().Context(), claims.Subject, limit, cursorID)
+	if err != nil {
+		if errors.Is(err, apperror.ErrEmployeeNotFound) {
+			// An unknown cursor: the cursor ID did not match a stored employee.
+			h.logger.Warn("reportee list rejected: unknown cursor",
+				"caller_id", claims.Subject, "cursor", cursorID)
+			return echo.NewHTTPError(http.StatusBadRequest, "unknown cursor")
+		}
+		var invalid apperror.ErrInvalidEmployee
+		if errors.As(err, &invalid) {
+			h.logger.Warn("reportee list rejected: validation failed",
+				"caller_id", claims.Subject, "reason", invalid.Error())
+			return echo.NewHTTPError(http.StatusBadRequest, invalid.Error())
+		}
+		h.logger.Error("reportee list failed",
+			"error", err, "caller_id", claims.Subject, "cursor", cursorID)
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to list reportees")
 	}
 
 	return c.JSON(http.StatusOK, dto.ToEmployeeListResponse(employees, nextCursorID))
