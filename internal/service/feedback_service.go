@@ -329,10 +329,10 @@ func (s *FeedbackService) ListByReviewee(ctx context.Context, revieweeID string,
 // EmployeeLookup the call fails closed with ErrForbidden: it cannot be
 // authorized, so it must not succeed.
 //
-// Visibility policy: as with ListByReviewee, the handler (via the DTO layer)
-// redacts reviewer_id on anonymous entries; the manager sees the same
-// redacted view the reviewee would see. This is enforced in
-// dto.ToFeedbackListResponse, not here.
+// Visibility policy: the manager never sees who wrote an entry. The handler
+// (via the DTO layer) blanks reviewer_id on every entry — including named
+// ones — while preserving comments in full. This is enforced in
+// dto.ToFeedbackManagerListResponse, not here.
 func (s *FeedbackService) ListByRevieweeForManager(ctx context.Context, callerID, revieweeID string, limit int, cursorID string) ([]*model.Feedback, string, error) {
 	if strings.TrimSpace(callerID) == "" {
 		s.logger.Warn("manager feedback list rejected: missing caller_id", "reviewee_id", revieweeID)

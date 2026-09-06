@@ -908,3 +908,76 @@ Expected response: `HTTP 204` with an empty body.
 | 401    | `"missing or invalid token"`   | No/invalid `Authorization` header or bad token. |
 | 404    | `"feedback draft not found"`   | No draft with this ID belongs to the caller.    |
 | 500    | `"failed"`                     | Unexpected server error.                        |
+
+---
+
+## List Feedback Received by an Employee (Manager View)
+
+`GET /v1/employees/:id/feedbacks` — returns one page of feedback entries
+received by the named employee, but only when the authenticated caller is
+that employee's manager. Ordered by `created_at` descending (newest first).
+Requires a valid `Bearer` JWT.
+
+Authorization is a fresh-load check: the reviewee's current `manager_id`
+must equal the caller's ID. A caller who is not the reviewee's manager —
+including the reviewee themselves — gets `403`; an unknown employee ID
+gets `404`.
+
+Visibility policy: the manager never sees who wrote an entry — `reviewer_id`
+is always empty in this view, including for entries with
+`visibility: "named"`. The comments themselves are returned in full. This
+differs from the reviewee's own view (`GET /v1/me/feedbacks`), where named
+entries still include `reviewer_id`.
+
+Pagination is cursor-based and controlled by the same two optional query
+parameters as `GET /v1/me/feedbacks`:
+
+| Parameter | Default | Notes                                                                                  |
+|-----------|---------|----------------------------------------------------------------------------------------|
+| `limit`   | `20`    | Page size. Non-numeric or `<= 0` falls back to the default; values above `100` are capped. |
+| `cursor`  | —       | The `next_cursor` value from the previous page (a feedback ID). Omit on the first page. An unknown cursor returns `400`. |
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X GET "http://localhost:1323/v1/employees/<reviewee id>/feedbacks?limit=20" \
+  -H "Authorization: Bearer <manager access_token>"
+```
+
+Expected response: `HTTP 200`:
+
+```json
+{
+  "feedbacks": [
+    {
+      "id": "0190abcd-...",
+      "period_id": "0190abca-...",
+      "reviewee_id": "<the reportee's id>",
+      "reviewer_id": "",
+      "communication_score": 4,
+      "leadership_score": 5,
+      "technical_score": 3,
+      "collaboration_score": 4,
+      "delivery_score": 5,
+      "trust_score": 2,
+      "strengths_comment": "great teammate",
+      "weaknesses_comment": "could document more",
+      "visibility": "named",
+      "status": "submitted",
+      "created_at": "2026-08-18T10:00:00Z",
+      "updated_at": "2026-08-18T10:00:00Z"
+    }
+  ],
+  "next_cursor": null
+}
+```
+
+Note `reviewer_id` is empty even though `visibility` is `named` — the manager
+view blinds reviewer identities unconditionally.
+
+| Status | `message`                                            | When                                                        |
+|--------|------------------------------------------------------|-------------------------------------------------------------|
+| 400    | `"unknown cursor"`                                  | `cursor` does not refer to an existing feedback entry.       |
+| 400    | `"<validation reason>"`                              | Malformed query values.                                     |
+| 401    | `"missing or invalid token"`                         | No/invalid `Authorization` header or bad token.             |
+| 403    | `"only the employee's manager can view their feedback"` | The caller is not the reviewee's current manager.        |
+| 404    | `"employee not found"`                               | No employee matches the reviewee ID.                       |
+| 500    | `"failed to list feedbacks"`                         | Unexpected server error.                                   |

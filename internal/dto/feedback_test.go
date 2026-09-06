@@ -223,3 +223,63 @@ func TestToFeedbackGivenListResponse(t *testing.T) {
 		}
 	})
 }
+
+func TestToFeedbackManagerListResponse(t *testing.T) {
+	t.Run("blinds reviewer identity on named and anonymous entries alike", func(t *testing.T) {
+		feedbacks := []*model.Feedback{
+			{ID: "fb-named", RevieweeID: "emp-2", ReviewerID: "reviewer-9", StrengthsComment: "named comment", WeaknessesComment: "growth note", Visibility: model.FeedbackVisibilityNamed},
+			{ID: "fb-anon", RevieweeID: "emp-2", ReviewerID: "reviewer-7", StrengthsComment: "anon comment", WeaknessesComment: "growth note", Visibility: model.FeedbackVisibilityAnonymous},
+		}
+		resp := ToFeedbackManagerListResponse(feedbacks, "fb-anon")
+		if len(resp.Feedbacks) != 2 {
+			t.Fatalf("got %d feedbacks, want 2", len(resp.Feedbacks))
+		}
+		if resp.Feedbacks[0].ReviewerID != "" {
+			t.Fatalf("named entry reviewer_id = %q, want empty (blinded in manager view)", resp.Feedbacks[0].ReviewerID)
+		}
+		if resp.Feedbacks[1].ReviewerID != "" {
+			t.Fatalf("anonymous entry reviewer_id = %q, want empty", resp.Feedbacks[1].ReviewerID)
+		}
+		// Comments must survive: the manager sees what was said, just not who
+		// said it.
+		if resp.Feedbacks[0].StrengthsComment != "named comment" || resp.Feedbacks[0].WeaknessesComment != "growth note" {
+			t.Fatalf("named entry comments were altered: %+v", resp.Feedbacks[0])
+		}
+		if resp.Feedbacks[1].StrengthsComment != "anon comment" {
+			t.Fatalf("anonymous entry comment altered: %+v", resp.Feedbacks[1])
+		}
+		if resp.NextCursor == nil || *resp.NextCursor != "fb-anon" {
+			t.Fatalf("next_cursor = %v, want fb-anon", resp.NextCursor)
+		}
+
+		out, err := json.Marshal(resp)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		s := string(out)
+		if strings.Contains(s, "reviewer-9") || strings.Contains(s, "reviewer-7") {
+			t.Fatalf("reviewer identity leaked in manager view JSON: %s", s)
+		}
+		if !strings.Contains(s, `"reviewer_id":""`) {
+			t.Fatalf("expected blank reviewer_id in JSON, got %s", s)
+		}
+		if !strings.Contains(s, "named comment") || !strings.Contains(s, "anon comment") {
+			t.Fatalf("expected comments preserved in JSON, got %s", s)
+		}
+	})
+
+	t.Run("nil input yields empty array and null cursor", func(t *testing.T) {
+		resp := ToFeedbackManagerListResponse(nil, "")
+		if resp.Feedbacks == nil || len(resp.Feedbacks) != 0 {
+			t.Fatalf("expected non-nil empty feedbacks, got %v", resp.Feedbacks)
+		}
+		out, err := json.Marshal(resp)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		want := `{"feedbacks":[],"next_cursor":null}`
+		if string(out) != want {
+			t.Fatalf("got %s, want %s", string(out), want)
+		}
+	})
+}

@@ -702,10 +702,10 @@ func TestListEmployeeFeedbacks_Handler(t *testing.T) {
 		return c, rec
 	}
 
-	t.Run("manager sees redacted anonymous feedback", func(t *testing.T) {
+	t.Run("manager sees all reviewer identities blinded but comments intact", func(t *testing.T) {
 		feedbacks := []*model.Feedback{
-			{ID: "fb-1", RevieweeID: "emp-2", ReviewerID: "reviewer-9", StrengthsComment: "s", WeaknessesComment: "w", Visibility: model.FeedbackVisibilityNamed},
-			{ID: "fb-2", RevieweeID: "emp-2", ReviewerID: "reviewer-7", StrengthsComment: "s", WeaknessesComment: "w", Visibility: model.FeedbackVisibilityAnonymous},
+			{ID: "fb-1", RevieweeID: "emp-2", ReviewerID: "reviewer-9", StrengthsComment: "named strengths", WeaknessesComment: "w", Visibility: model.FeedbackVisibilityNamed},
+			{ID: "fb-2", RevieweeID: "emp-2", ReviewerID: "reviewer-7", StrengthsComment: "anon strengths", WeaknessesComment: "w", Visibility: model.FeedbackVisibilityAnonymous},
 		}
 		svc := &fakeFeedbackService{
 			listForManager: func(_ context.Context, callerID, revieweeID string, _ int, _ string) ([]*model.Feedback, string, error) {
@@ -728,13 +728,21 @@ func TestListEmployeeFeedbacks_Handler(t *testing.T) {
 			t.Fatalf("got status %d, want %d", rec.Code, http.StatusOK)
 		}
 		body := rec.Body.String()
-		// The named entry keeps its reviewer_id.
-		if !strings.Contains(body, `"reviewer_id":"reviewer-9"`) {
-			t.Fatalf("expected named entry to keep reviewer_id, got %s", body)
+		// Named entries are blinded too: the manager never sees who wrote.
+		if strings.Contains(body, "reviewer-9") {
+			t.Fatalf("named reviewer id must be blinded for the manager, got %s", body)
 		}
 		// The anonymous entry must have its reviewer_id blanked.
 		if strings.Contains(body, "reviewer-7") {
 			t.Fatalf("anonymous reviewer id must be redacted for the manager, got %s", body)
+		}
+		// Every entry carries an empty reviewer_id.
+		if strings.Count(body, `"reviewer_id":""`) != 2 {
+			t.Fatalf("expected 2 blank reviewer_id fields, got %s", body)
+		}
+		// Comments survive: the manager sees what was said, just not who said it.
+		if !strings.Contains(body, "named strengths") || !strings.Contains(body, "anon strengths") {
+			t.Fatalf("expected comments preserved in manager view, got %s", body)
 		}
 	})
 

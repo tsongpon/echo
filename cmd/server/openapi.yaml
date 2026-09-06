@@ -1051,10 +1051,12 @@ paths:
         `next_cursor` is `null` there are no more pages. An unknown cursor
         (one that does not refer to an existing feedback entry) returns `400`.
 
-        Visibility policy: identical to the reviewee's own view — for entries
-        with `visibility: "anonymous"`, `reviewer_id` is empty in the response.
-        The manager sees the same redacted view the reviewee sees. Entries
-        with `visibility: "named"` include `reviewer_id` as usual.
+        Visibility policy: the manager never sees who wrote an entry —
+        `reviewer_id` is always empty in this view, including for entries
+        with `visibility: "named"`. The comments themselves are returned in
+        full. This differs from the reviewee's own view
+        (`GET /v1/me/feedbacks`), where named entries still include
+        `reviewer_id`.
       operationId: listEmployeeFeedbacks
       security:
         - BearerAuth: []
@@ -1074,7 +1076,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/FeedbackListResponse"
+                $ref: "#/components/schemas/FeedbackManagerListResponse"
         "400":
           description: Unknown cursor.
           content:
@@ -1722,6 +1724,46 @@ components:
                 visibility: "anonymous" (the reviewer's identity is hidden from
                 the reviewee). A UUID for visibility: "named" entries.
           required: [reviewer_id]
+
+    # FeedbackManagerItemResponse is FeedbackResponse with reviewer_id always
+    # empty: the manager view blinds who wrote every entry, named or
+    # anonymous, while returning comments in full.
+    FeedbackManagerItemResponse:
+      allOf:
+        - $ref: "#/components/schemas/FeedbackResponse"
+        - type: object
+          properties:
+            reviewer_id:
+              type: string
+              description: |
+                Always empty in the manager view: the manager never sees who
+                wrote the feedback, including for visibility: "named" entries.
+                The reviewee still sees named reviewers in their own view
+                (GET /v1/me/feedbacks).
+              const: ""
+          required: [reviewer_id]
+
+    FeedbackManagerListResponse:
+      type: object
+      description: |
+        One page of feedback entries received by the caller's reportee plus
+        the next-page cursor. The manager view blinds reviewer identities:
+        reviewer_id is always empty, including for named entries. Comments
+        are returned in full.
+      properties:
+        feedbacks:
+          type: array
+          description: The reportee's received feedback on this page, ordered by created_at descending. Never null (empty array when the reportee has received no feedback).
+          items:
+            $ref: "#/components/schemas/FeedbackManagerItemResponse"
+        next_cursor:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            The ID of the last feedback entry on this page; pass it as `cursor`
+            on the next request. Null when there are no more pages.
+      required: [feedbacks, next_cursor]
     CreateFeedbackDraftRequest:
       type: object
       description: |

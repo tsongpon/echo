@@ -212,10 +212,11 @@ func (h *FeedbackHandler) ListMyGivenFeedbacks(c *echo.Context) error {
 //   - cursor: the ID of the last feedback entry from the previous page (the
 //     next_cursor value the client received). Omit on the first page.
 //
-// Visibility policy: as with the reviewee's own view, entries with
-// visibility == "anonymous" have their reviewer_id blanked in the response —
-// the manager sees the same redacted view the reviewee sees. Named entries
-// include reviewer_id as usual.
+// Visibility policy: the manager never sees who wrote an entry — reviewer_id
+// is blanked on every entry in this view, including entries with
+// visibility == "named". The comments themselves are shown in full. (The
+// reviewee's own view, GET /v1/me/feedbacks, is unaffected: named entries
+// still include reviewer_id there.)
 func (h *FeedbackHandler) ListEmployeeFeedbacks(c *echo.Context) error {
 	claims := ClaimsFromContext(c)
 	if claims == nil {
@@ -261,7 +262,7 @@ func (h *FeedbackHandler) ListEmployeeFeedbacks(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to list feedbacks")
 	}
 
-	return c.JSON(http.StatusOK, dto.ToFeedbackListResponse(feedbacks, nextCursorID))
+	return c.JSON(http.StatusOK, dto.ToFeedbackManagerListResponse(feedbacks, nextCursorID))
 }
 
 // draftApply resolves the fields an UpdateFeedbackDraftRequest explicitly

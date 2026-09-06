@@ -207,6 +207,28 @@ func ToFeedbackListResponse(feedbacks []*model.Feedback, nextCursorID string) Fe
 	return FeedbackListResponse{Feedbacks: out, NextCursor: cursor}
 }
 
+// ToFeedbackManagerListResponse maps a slice of a reportee's feedback entries
+// to the manager-view list response shape. Visibility policy: the manager
+// never sees who wrote an entry — ReviewerID is blanked unconditionally,
+// including for entries with visibility "named" (the reviewee still sees
+// named reviewers in their own view; only the manager view is blinded).
+// Comments are intentionally preserved in full. nextCursorID semantics match
+// ToFeedbackListResponse.
+func ToFeedbackManagerListResponse(feedbacks []*model.Feedback, nextCursorID string) FeedbackListResponse {
+	out := make([]FeedbackResponse, 0, len(feedbacks))
+	for _, f := range feedbacks {
+		resp := ToFeedbackResponse(f)
+		resp.ReviewerID = ""
+		out = append(out, resp)
+	}
+	var cursor *string
+	if nextCursorID != "" {
+		c := nextCursorID
+		cursor = &c
+	}
+	return FeedbackListResponse{Feedbacks: out, NextCursor: cursor}
+}
+
 // FeedbackDraftListResponse is the paginated wrapper returned by
 // GET /v1/feedback-drafts: the authenticated caller's own draft entries,
 // ordered by created_at descending. As with FeedbackListResponse the drafts
