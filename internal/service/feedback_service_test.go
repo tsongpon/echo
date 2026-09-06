@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,203 @@ type fakeFeedbackRepo struct {
 	createFn       func(ctx context.Context, feedback *model.Feedback) (*model.Feedback, error)
 	listByReviewee func(ctx context.Context, revieweeID string, limit int, cursorID string) ([]*model.Feedback, string, error)
 	byReviewee     map[string][]*model.Feedback
+
+	// Draft-support state: an in-memory store keyed by feedback ID plus
+	// override hooks mirroring the real repository's draft methods.
+	drafts        map[string]*model.Feedback
+	claims        map[string]bool
+	getFn         func(ctx context.Context, id string) (*model.Feedback, error)
+	createDraftFn func(ctx context.Context, feedback *model.Feedback) (*model.Feedback, error)
+	updateDraftFn func(ctx context.Context, feedback *model.Feedback) (*model.Feedback, error)
+	submitDraftFn func(ctx context.Context, id string) (*model.Feedback, error)
+	deleteDraftFn func(ctx context.Context, id string) error
+	listDraftsFn  func(ctx context.Context, reviewerID string, limit int, cursorID string) ([]*model.Feedback, string, error)
+	listGivenFn   func(ctx context.Context, reviewerID string, limit int, cursorID string) ([]*model.Feedback, string, error)
+}
+
+func (f *fakeFeedbackRepo) Get(_ context.Context, id string) (*model.Feedback, error) {
+	if f.getFn != nil {
+		return f.getFn(context.Background(), id)
+	}
+	if fb, ok := f.drafts[id]; ok {
+		// Return a copy so a test that mutates the stored entry between the
+		// service's read and write simulates a genuinely concurrent update,
+		// the way a Firestore round trip would.
+		copied := *fb
+		return &copied, nil
+	}
+	return nil, apperror.ErrFeedbackNotFound
+}
+
+func (f *fakeFeedbackRepo) CreateDraft(ctx context.Context, feedback *model.Feedback) (*model.Feedback, error) {
+	if f.createDraftFn != nil {
+		return f.createDraftFn(ctx, feedback)
+	}
+	if f.drafts == nil {
+		f.drafts = map[string]*model.Feedback{}
+	}
+	if f.claims == nil {
+		f.claims = map[string]bool{}
+	}
+	claim := feedback.ReviewerID + "_" + feedback.RevieweeID + "_" + feedback.PeriodID
+	if f.claims[claim] {
+		return nil, apperror.ErrFeedbackDraftAlreadyExists
+	}
+	f.claims[claim] = true
+	stored := *feedback
+	now := time.Now()
+	stored.CreatedAt = now
+	stored.UpdatedAt = now
+	f.drafts[stored.ID] = &stored
+	return &stored, nil
+}
+
+func (f *fakeFeedbackRepo) UpdateDraft(ctx context.Context, feedback *model.Feedback) (*model.Feedback, error) {
+	if f.updateDraftFn != nil {
+		return f.updateDraftFn(ctx, feedback)
+	}
+	current, ok := f.drafts[feedback.ID]
+	if !ok || current.NormalizedStatus() != model.FeedbackStatusDraft {
+		return nil, apperror.ErrFeedbackNotFound
+	}
+	if !current.UpdatedAt.Equal(feedback.UpdatedAt) {
+		return nil, apperror.ErrFeedbackConcurrentUpdate
+	}
+	updated := *feedback
+	updated.Status = model.FeedbackStatusDraft
+	updated.UpdatedAt = time.Now()
+	f.drafts[feedback.ID] = &updated
+	return &updated, nil
+}
+
+func (f *fakeFeedbackRepo) SubmitDraft(ctx context.Context, id string) (*model.Feedback, error) {
+	if f.submitDraftFn != nil {
+		return f.submitDraftFn(ctx, id)
+	}
+	current, ok := f.drafts[id]
+	if !ok || current.NormalizedStatus() != model.FeedbackStatusDraft {
+		return nil, apperror.ErrFeedbackNotFound
+	}
+	submitted := *current
+	submitted.Status = model.FeedbackStatusSubmitted
+	f.drafts[id] = &submitted
+	claim := submitted.ReviewerID + "_" + submitted.RevieweeID + "_" + submitted.PeriodID
+	delete(f.claims, claim)
+	return &submitted, nil
+}
+
+func (f *fakeFeedbackRepo) DeleteDraft(ctx context.Context, id string) error {
+	if f.deleteDraftFn != nil {
+		return f.deleteDraftFn(ctx, id)
+	}
+	current, ok := f.drafts[id]
+	if !ok || current.NormalizedStatus() != model.FeedbackStatusDraft {
+		return apperror.ErrFeedbackNotFound
+	}
+	delete(f.drafts, id)
+	claim := current.ReviewerID + "_" + current.RevieweeID + "_" + current.PeriodID
+	delete(f.claims, claim)
+	return nil
+}
+
+func (f *fakeFeedbackRepo) ListDraftsByReviewer(ctx context.Context, reviewerID string, limit int, cursorID string) ([]*model.Feedback, string, error) {
+	if f.listDraftsFn != nil {
+		return f.listDraftsFn(ctx, reviewerID, limit, cursorID)
+	}
+	var all []*model.Feedback
+	for _, fb := range f.drafts {
+		if fb.ReviewerID == reviewerID && fb.NormalizedStatus() == model.FeedbackStatusDraft {
+			all = append(all, fb)
+		}
+	}
+	// Newest first by CreatedAt, then by ID for stability.
+	sort.Slice(all, func(i, j int) bool {
+		if !all[i].CreatedAt.Equal(all[j].CreatedAt) {
+			return all[i].CreatedAt.After(all[j].CreatedAt)
+		}
+		return all[i].ID > all[j].ID
+	})
+	start := 0
+	if strings.TrimSpace(cursorID) != "" {
+		found := -1
+		for i, fb := range all {
+			if fb.ID == cursorID {
+				found = i
+				break
+			}
+		}
+		if found == -1 {
+			return nil, "", apperror.ErrFeedbackNotFound
+		}
+		start = found + 1
+	}
+	if limit <= 0 {
+		limit = DefaultDraftListLimit
+	}
+	end := start + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	page := all[start:end]
+	next := ""
+	if end < len(all) && len(page) > 0 {
+		next = page[len(page)-1].ID
+	}
+	return page, next, nil
+}
+
+// ListSubmittedByReviewer mirrors service.FeedbackRepository.
+// ListSubmittedByReviewer. When listGivenFn is nil it serves from an
+// in-memory slice (set via byReviewee below, filtered to submitted entries
+// the reviewer wrote) so tests can exercise the happy path and pagination.
+// Unknown cursor IDs return apperror.ErrFeedbackNotFound, matching the real
+// Firestore repository.
+func (f *fakeFeedbackRepo) ListSubmittedByReviewer(ctx context.Context, reviewerID string, limit int, cursorID string) ([]*model.Feedback, string, error) {
+	if f.listGivenFn != nil {
+		return f.listGivenFn(ctx, reviewerID, limit, cursorID)
+	}
+	var all []*model.Feedback
+	for _, entries := range f.byReviewee {
+		for _, fb := range entries {
+			if fb.ReviewerID == reviewerID && fb.NormalizedStatus() == model.FeedbackStatusSubmitted {
+				all = append(all, fb)
+			}
+		}
+	}
+	// Newest first by CreatedAt, then by ID for stability.
+	sort.Slice(all, func(i, j int) bool {
+		if !all[i].CreatedAt.Equal(all[j].CreatedAt) {
+			return all[i].CreatedAt.After(all[j].CreatedAt)
+		}
+		return all[i].ID > all[j].ID
+	})
+	start := 0
+	if strings.TrimSpace(cursorID) != "" {
+		found := -1
+		for i, fb := range all {
+			if fb.ID == cursorID {
+				found = i
+				break
+			}
+		}
+		if found == -1 {
+			return nil, "", apperror.ErrFeedbackNotFound
+		}
+		start = found + 1
+	}
+	if limit <= 0 {
+		limit = DefaultFeedbackListLimit
+	}
+	end := start + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	page := all[start:end]
+	next := ""
+	if end < len(all) && len(page) > 0 {
+		next = page[len(page)-1].ID
+	}
+	return page, next, nil
 }
 
 func (f *fakeFeedbackRepo) Create(ctx context.Context, feedback *model.Feedback) (*model.Feedback, error) {
@@ -76,11 +274,12 @@ func (f *fakeFeedbackRepo) ListByReviewee(_ context.Context, revieweeID string, 
 }
 
 // fakePeriodLookup is an in-test stand-in for service.FeedbackPeriodLookup.
-// By default it resolves any ID to a non-nil period (the happy path); tests
-// can override getFn to simulate a missing period or a repository failure.
+// By default it resolves any ID to a period whose date window is always open
+// (a wide range around now); tests can override getFn to simulate a missing
+// period, a repository failure, or a closed window.
 type fakePeriodLookup struct {
-	gotID   string
-	getFn  func(ctx context.Context, id string) (*model.FeedbackPeriod, error)
+	gotID string
+	getFn func(ctx context.Context, id string) (*model.FeedbackPeriod, error)
 }
 
 func (f *fakePeriodLookup) GetByID(ctx context.Context, id string) (*model.FeedbackPeriod, error) {
@@ -88,7 +287,7 @@ func (f *fakePeriodLookup) GetByID(ctx context.Context, id string) (*model.Feedb
 	if f.getFn != nil {
 		return f.getFn(ctx, id)
 	}
-	return &model.FeedbackPeriod{ID: id, Name: "Test Period"}, nil
+	return &model.FeedbackPeriod{ID: id, Name: "Test Period", StartDate: time.Now().Add(-24 * time.Hour), EndDate: time.Now().Add(24 * time.Hour)}, nil
 }
 
 // fakeEmployeeLookup is an in-test stand-in for service.EmployeeLookup. It
@@ -425,10 +624,10 @@ func TestFeedback_ListByReviewee(t *testing.T) {
 		out := make([]*model.Feedback, 0, n)
 		for i := 1; i <= n; i++ {
 			out = append(out, &model.Feedback{
-				ID:        "fb-" + itoa(i),
+				ID:         "fb-" + itoa(i),
 				RevieweeID: "reviewee-1",
-				PeriodID:  "period-1",
-				CreatedAt: time.Unix(int64(i), 0).UTC(),
+				PeriodID:   "period-1",
+				CreatedAt:  time.Unix(int64(i), 0).UTC(),
 			})
 		}
 		return out
@@ -733,6 +932,727 @@ func TestFeedback_ListByRevieweeForManager(t *testing.T) {
 		_, _, err := svc.ListByRevieweeForManager(context.Background(), "manager-1", "", 0, "")
 		if !apperror.IsInvalidFeedback(err) {
 			t.Fatalf("expected ErrInvalidFeedback for missing reviewee, got %v", err)
+		}
+	})
+}
+
+// draftInput returns a minimal draft input: only the required reviewee and
+// period set, everything else empty — the "start a draft" shape.
+func draftInput() *model.Feedback {
+	return &model.Feedback{
+		PeriodID:   "period-1",
+		RevieweeID: "reviewee-1",
+	}
+}
+
+// completeDraft returns a draft input with all submit-required fields filled.
+func completeDraft() *model.Feedback {
+	return &model.Feedback{
+		PeriodID:           "period-1",
+		RevieweeID:         "reviewee-1",
+		CommunicationScore: 4,
+		LeadershipScore:    5,
+		TechnicalScore:     3,
+		CollaborationScore: 4,
+		DeliveryScore:      5,
+		TrustScore:         2,
+		StrengthsComment:   "great teammate",
+		WeaknessesComment:  "could document more",
+		Visibility:         model.FeedbackVisibilityAnonymous,
+		Status:             model.FeedbackStatusDraft,
+	}
+}
+
+func TestFeedback_CreateDraft(t *testing.T) {
+	t.Run("success with minimal input", func(t *testing.T) {
+		svc, repo, periods := newFeedbackTestService()
+
+		created, err := svc.CreateDraft(context.Background(), "reviewer-1", draftInput())
+		if err != nil {
+			t.Fatalf("CreateDraft: unexpected error: %v", err)
+		}
+		if created.ReviewerID != "reviewer-1" {
+			t.Fatalf("got reviewer_id %q, want reviewer-1 (from caller)", created.ReviewerID)
+		}
+		if created.Status != model.FeedbackStatusDraft {
+			t.Fatalf("got status %q, want draft", created.Status)
+		}
+		if created.ID == "" {
+			t.Fatal("expected a non-empty ID assigned by the service")
+		}
+		if repo.created != nil && repo.drafts[created.ID] == nil {
+			t.Fatal("expected the draft to be stored via CreateDraft")
+		}
+		if periods.gotID != "period-1" {
+			t.Fatalf("service looked up period %q, want period-1", periods.gotID)
+		}
+	})
+
+	t.Run("partial scores are accepted but bounds-checked", func(t *testing.T) {
+		svc, _, _ := newFeedbackTestService()
+		d := draftInput()
+		d.CommunicationScore = 3
+		d.TrustScore = 5
+
+		if _, err := svc.CreateDraft(context.Background(), "reviewer-1", d); err != nil {
+			t.Fatalf("CreateDraft: unexpected error: %v", err)
+		}
+
+		svc2, _, _ := newFeedbackTestService()
+		bad := draftInput()
+		bad.CommunicationScore = 6
+		_, err := svc2.CreateDraft(context.Background(), "reviewer-1", bad)
+		if !apperror.IsInvalidFeedback(err) {
+			t.Fatalf("expected ErrInvalidFeedback for out-of-range score, got %v", err)
+		}
+		if err.Error() != "communication_score must be between 1 and 5" {
+			t.Fatalf("expected score range message, got %q", err.Error())
+		}
+	})
+
+	t.Run("self-review rejected", func(t *testing.T) {
+		svc, _, _ := newFeedbackTestService()
+		d := draftInput()
+		d.RevieweeID = "reviewer-1"
+
+		_, err := svc.CreateDraft(context.Background(), "reviewer-1", d)
+		if err == nil || err.Error() != "reviewer cannot review themselves" {
+			t.Fatalf("expected self-review rejection, got %v", err)
+		}
+	})
+
+	t.Run("missing period and reviewee rejected", func(t *testing.T) {
+		svc, _, _ := newFeedbackTestService()
+		if _, err := svc.CreateDraft(context.Background(), "reviewer-1", &model.Feedback{RevieweeID: "r"}); err == nil || err.Error() != "period_id is required" {
+			t.Fatalf("expected period_id rejection, got %v", err)
+		}
+		svc2, _, _ := newFeedbackTestService()
+		if _, err := svc2.CreateDraft(context.Background(), "reviewer-1", &model.Feedback{PeriodID: "p"}); err == nil || err.Error() != "reviewee_id is required" {
+			t.Fatalf("expected reviewee_id rejection, got %v", err)
+		}
+	})
+
+	t.Run("duplicate draft for the same pair rejected", func(t *testing.T) {
+		svc, _, _ := newFeedbackTestService()
+		if _, err := svc.CreateDraft(context.Background(), "reviewer-1", draftInput()); err != nil {
+			t.Fatalf("first CreateDraft: %v", err)
+		}
+		_, err := svc.CreateDraft(context.Background(), "reviewer-1", draftInput())
+		if !errors.Is(err, apperror.ErrFeedbackDraftAlreadyExists) {
+			t.Fatalf("expected ErrFeedbackDraftAlreadyExists, got %v", err)
+		}
+	})
+
+	t.Run("closed period window does not block drafting", func(t *testing.T) {
+		// A draft may be started before the period opens; only submission is
+		// window-gated.
+		periods := &fakePeriodLookup{}
+		periods.getFn = func(_ context.Context, id string) (*model.FeedbackPeriod, error) {
+			return &model.FeedbackPeriod{ID: id, StartDate: time.Now().Add(24 * time.Hour), EndDate: time.Now().Add(48 * time.Hour)}, nil
+		}
+		repo := &fakeFeedbackRepo{}
+		svc := NewFeedbackService(repo, periods, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		if _, err := svc.CreateDraft(context.Background(), "reviewer-1", draftInput()); err != nil {
+			t.Fatalf("CreateDraft during closed window: unexpected error: %v", err)
+		}
+	})
+
+	t.Run("visibility normalized to anonymous", func(t *testing.T) {
+		svc, _, _ := newFeedbackTestService()
+		d := draftInput()
+		d.Visibility = ""
+
+		created, err := svc.CreateDraft(context.Background(), "reviewer-1", d)
+		if err != nil {
+			t.Fatalf("CreateDraft: unexpected error: %v", err)
+		}
+		if created.Visibility != model.FeedbackVisibilityAnonymous {
+			t.Fatalf("got visibility %q, want anonymous", created.Visibility)
+		}
+	})
+}
+
+func TestFeedback_GetDraft(t *testing.T) {
+	t.Run("author can fetch own draft", func(t *testing.T) {
+		svc, repo, _ := newFeedbackTestService()
+		created, err := svc.CreateDraft(context.Background(), "reviewer-1", draftInput())
+		if err != nil {
+			t.Fatalf("CreateDraft: %v", err)
+		}
+
+		got, err := svc.GetDraft(context.Background(), "reviewer-1", created.ID)
+		if err != nil {
+			t.Fatalf("GetDraft: %v", err)
+		}
+		if got.ID != created.ID {
+			t.Fatalf("got draft %q, want %q", got.ID, created.ID)
+		}
+		_ = repo
+	})
+
+	t.Run("non-author gets not-found, not forbidden", func(t *testing.T) {
+		// A draft's existence must not leak: another caller sees the same
+		// 404 as for a missing draft.
+		svc, _, _ := newFeedbackTestService()
+		created, err := svc.CreateDraft(context.Background(), "reviewer-1", draftInput())
+		if err != nil {
+			t.Fatalf("CreateDraft: %v", err)
+		}
+
+		_, err = svc.GetDraft(context.Background(), "reviewer-2", created.ID)
+		if !errors.Is(err, apperror.ErrFeedbackNotFound) {
+			t.Fatalf("expected ErrFeedbackNotFound for non-author, got %v", err)
+		}
+	})
+
+	t.Run("submitted entry is not a draft", func(t *testing.T) {
+		svc, _, _ := newFeedbackTestService()
+		created, err := svc.CreateDraft(context.Background(), "reviewer-1", completeDraft())
+		if err != nil {
+			t.Fatalf("CreateDraft: %v", err)
+		}
+		if _, err := svc.SubmitDraft(context.Background(), "reviewer-1", created.ID, nil); err != nil {
+			t.Fatalf("SubmitDraft: %v", err)
+		}
+
+		_, err = svc.GetDraft(context.Background(), "reviewer-1", created.ID)
+		if !errors.Is(err, apperror.ErrFeedbackNotFound) {
+			t.Fatalf("expected ErrFeedbackNotFound for submitted entry, got %v", err)
+		}
+	})
+}
+
+func TestFeedback_UpdateDraft(t *testing.T) {
+	t.Run("partial update leaves omitted fields untouched", func(t *testing.T) {
+		svc, _, _ := newFeedbackTestService()
+		created, err := svc.CreateDraft(context.Background(), "reviewer-1", func() *model.Feedback {
+			d := draftInput()
+			d.StrengthsComment = "original"
+			d.CommunicationScore = 2
+			return d
+		}())
+		if err != nil {
+			t.Fatalf("CreateDraft: %v", err)
+		}
+
+		four := 4
+		updated, err := svc.UpdateDraft(context.Background(), "reviewer-1", created.ID, func(f *model.Feedback) error {
+			f.CommunicationScore = four
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("UpdateDraft: %v", err)
+		}
+		if updated.CommunicationScore != 4 {
+			t.Fatalf("got communication_score %d, want 4", updated.CommunicationScore)
+		}
+		if updated.StrengthsComment != "original" {
+			t.Fatalf("omitted strengths_comment changed: got %q", updated.StrengthsComment)
+		}
+	})
+
+	t.Run("out-of-range score rejected", func(t *testing.T) {
+		svc, _, _ := newFeedbackTestService()
+		created, err := svc.CreateDraft(context.Background(), "reviewer-1", draftInput())
+		if err != nil {
+			t.Fatalf("CreateDraft: %v", err)
+		}
+
+		_, err = svc.UpdateDraft(context.Background(), "reviewer-1", created.ID, func(f *model.Feedback) error {
+			f.TrustScore = 9
+			return nil
+		})
+		if !apperror.IsInvalidFeedback(err) {
+			t.Fatalf("expected ErrInvalidFeedback, got %v", err)
+		}
+	})
+
+	t.Run("non-author gets not-found", func(t *testing.T) {
+		svc, _, _ := newFeedbackTestService()
+		created, err := svc.CreateDraft(context.Background(), "reviewer-1", draftInput())
+		if err != nil {
+			t.Fatalf("CreateDraft: %v", err)
+		}
+
+		_, err = svc.UpdateDraft(context.Background(), "reviewer-2", created.ID, func(f *model.Feedback) error { return nil })
+		if !errors.Is(err, apperror.ErrFeedbackNotFound) {
+			t.Fatalf("expected ErrFeedbackNotFound, got %v", err)
+		}
+	})
+
+	t.Run("concurrent write between read and update is rejected", func(t *testing.T) {
+		svc, _, _ := newFeedbackTestService()
+		created, err := svc.CreateDraft(context.Background(), "reviewer-1", draftInput())
+		if err != nil {
+			t.Fatalf("CreateDraft: %v", err)
+		}
+
+		// Simulate another device's edit landing between this request's
+		// read (GetDraft inside UpdateDraft) and its write: the hook bumps the
+		// stored UpdatedAt just before the repository compares them, exactly
+		// where a real Firestore transaction would detect the race.
+		repo := svc.repo.(*fakeFeedbackRepo)
+		injected := repo.updateDraftFn
+		repo.updateDraftFn = func(ctx context.Context, feedback *model.Feedback) (*model.Feedback, error) {
+			stored := repo.drafts[feedback.ID]
+			stored.UpdatedAt = stored.UpdatedAt.Add(time.Second)
+			if injected != nil {
+				return injected(ctx, feedback)
+			}
+			// Re-run the default comparison with the bumped timestamp.
+			current := repo.drafts[feedback.ID]
+			if current.NormalizedStatus() != model.FeedbackStatusDraft {
+				return nil, apperror.ErrFeedbackNotFound
+			}
+			if !current.UpdatedAt.Equal(feedback.UpdatedAt) {
+				return nil, apperror.ErrFeedbackConcurrentUpdate
+			}
+			updated := *feedback
+			repo.drafts[feedback.ID] = &updated
+			return &updated, nil
+		}
+
+		_, err = svc.UpdateDraft(context.Background(), "reviewer-1", created.ID, func(f *model.Feedback) error { return nil })
+		if !errors.Is(err, apperror.ErrFeedbackConcurrentUpdate) {
+			t.Fatalf("expected ErrFeedbackConcurrentUpdate, got %v", err)
+		}
+	})
+}
+
+func TestFeedback_SubmitDraft(t *testing.T) {
+	t.Run("complete draft submits successfully", func(t *testing.T) {
+		svc, repo, _ := newFeedbackTestService()
+		created, err := svc.CreateDraft(context.Background(), "reviewer-1", completeDraft())
+		if err != nil {
+			t.Fatalf("CreateDraft: %v", err)
+		}
+
+		submitted, err := svc.SubmitDraft(context.Background(), "reviewer-1", created.ID, nil)
+		if err != nil {
+			t.Fatalf("SubmitDraft: %v", err)
+		}
+		if submitted.Status != model.FeedbackStatusSubmitted {
+			t.Fatalf("got status %q, want submitted", submitted.Status)
+		}
+		// The claim is released so a new draft for the same pair is allowed.
+		claim := "reviewer-1_reviewee-1_period-1"
+		if repo.claims[claim] {
+			t.Fatal("expected the draft claim to be released on submit")
+		}
+	})
+
+	t.Run("final edits applied via apply func", func(t *testing.T) {
+		svc, _, _ := newFeedbackTestService()
+		created, err := svc.CreateDraft(context.Background(), "reviewer-1", draftInput())
+		if err != nil {
+			t.Fatalf("CreateDraft: %v", err)
+		}
+
+		submitted, err := svc.SubmitDraft(context.Background(), "reviewer-1", created.ID, func(f *model.Feedback) error {
+			f.CommunicationScore = 4
+			f.LeadershipScore = 5
+			f.TechnicalScore = 3
+			f.CollaborationScore = 4
+			f.DeliveryScore = 5
+			f.TrustScore = 2
+			f.StrengthsComment = "great"
+			f.WeaknessesComment = "docs"
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("SubmitDraft: %v", err)
+		}
+		if submitted.StrengthsComment != "great" {
+			t.Fatalf("final edit not applied: got strengths_comment %q", submitted.StrengthsComment)
+		}
+	})
+
+	t.Run("incomplete draft rejected at submit", func(t *testing.T) {
+		svc, _, _ := newFeedbackTestService()
+		created, err := svc.CreateDraft(context.Background(), "reviewer-1", draftInput())
+		if err != nil {
+			t.Fatalf("CreateDraft: %v", err)
+		}
+
+		_, err = svc.SubmitDraft(context.Background(), "reviewer-1", created.ID, nil)
+		if !apperror.IsInvalidFeedback(err) {
+			t.Fatalf("expected ErrInvalidFeedback for incomplete draft, got %v", err)
+		}
+		if err.Error() != "communication_score must be between 1 and 5" {
+			t.Fatalf("expected missing-score message, got %q", err.Error())
+		}
+	})
+
+	t.Run("closed period window rejected", func(t *testing.T) {
+		periods := &fakePeriodLookup{}
+		periods.getFn = func(_ context.Context, id string) (*model.FeedbackPeriod, error) {
+			return &model.FeedbackPeriod{ID: id, StartDate: time.Now().Add(24 * time.Hour), EndDate: time.Now().Add(48 * time.Hour)}, nil
+		}
+		repo := &fakeFeedbackRepo{}
+		svc := NewFeedbackService(repo, periods, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		created, err := svc.CreateDraft(context.Background(), "reviewer-1", completeDraft())
+		if err != nil {
+			t.Fatalf("CreateDraft: %v", err)
+		}
+		_, err = svc.SubmitDraft(context.Background(), "reviewer-1", created.ID, nil)
+		if !errors.Is(err, apperror.ErrFeedbackPeriodClosed) {
+			t.Fatalf("expected ErrFeedbackPeriodClosed, got %v", err)
+		}
+	})
+
+	t.Run("expired period window rejected", func(t *testing.T) {
+		periods := &fakePeriodLookup{}
+		periods.getFn = func(_ context.Context, id string) (*model.FeedbackPeriod, error) {
+			return &model.FeedbackPeriod{ID: id, StartDate: time.Now().Add(-48 * time.Hour), EndDate: time.Now().Add(-24 * time.Hour)}, nil
+		}
+		repo := &fakeFeedbackRepo{}
+		svc := NewFeedbackService(repo, periods, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		created, err := svc.CreateDraft(context.Background(), "reviewer-1", completeDraft())
+		if err != nil {
+			t.Fatalf("CreateDraft: %v", err)
+		}
+		_, err = svc.SubmitDraft(context.Background(), "reviewer-1", created.ID, nil)
+		if !errors.Is(err, apperror.ErrFeedbackPeriodClosed) {
+			t.Fatalf("expected ErrFeedbackPeriodClosed, got %v", err)
+		}
+	})
+
+	t.Run("double submit rejected", func(t *testing.T) {
+		svc, _, _ := newFeedbackTestService()
+		created, err := svc.CreateDraft(context.Background(), "reviewer-1", completeDraft())
+		if err != nil {
+			t.Fatalf("CreateDraft: %v", err)
+		}
+		if _, err := svc.SubmitDraft(context.Background(), "reviewer-1", created.ID, nil); err != nil {
+			t.Fatalf("first SubmitDraft: %v", err)
+		}
+
+		_, err = svc.SubmitDraft(context.Background(), "reviewer-1", created.ID, nil)
+		if !errors.Is(err, apperror.ErrFeedbackNotFound) {
+			t.Fatalf("expected ErrFeedbackNotFound on double submit, got %v", err)
+		}
+	})
+
+	t.Run("non-author gets not-found", func(t *testing.T) {
+		svc, _, _ := newFeedbackTestService()
+		created, err := svc.CreateDraft(context.Background(), "reviewer-1", completeDraft())
+		if err != nil {
+			t.Fatalf("CreateDraft: %v", err)
+		}
+
+		_, err = svc.SubmitDraft(context.Background(), "reviewer-2", created.ID, nil)
+		if !errors.Is(err, apperror.ErrFeedbackNotFound) {
+			t.Fatalf("expected ErrFeedbackNotFound for non-author, got %v", err)
+		}
+	})
+}
+
+func TestFeedback_DeleteDraft(t *testing.T) {
+	t.Run("delete releases the claim", func(t *testing.T) {
+		svc, repo, _ := newFeedbackTestService()
+		created, err := svc.CreateDraft(context.Background(), "reviewer-1", draftInput())
+		if err != nil {
+			t.Fatalf("CreateDraft: %v", err)
+		}
+
+		if err := svc.DeleteDraft(context.Background(), "reviewer-1", created.ID); err != nil {
+			t.Fatalf("DeleteDraft: %v", err)
+		}
+		claim := "reviewer-1_reviewee-1_period-1"
+		if repo.claims[claim] {
+			t.Fatal("expected the draft claim to be released on delete")
+		}
+		// The same pair may draft again immediately.
+		if _, err := svc.CreateDraft(context.Background(), "reviewer-1", draftInput()); err != nil {
+			t.Fatalf("re-draft after delete: %v", err)
+		}
+	})
+
+	t.Run("non-author gets not-found", func(t *testing.T) {
+		svc, _, _ := newFeedbackTestService()
+		created, err := svc.CreateDraft(context.Background(), "reviewer-1", draftInput())
+		if err != nil {
+			t.Fatalf("CreateDraft: %v", err)
+		}
+
+		if err := svc.DeleteDraft(context.Background(), "reviewer-2", created.ID); !errors.Is(err, apperror.ErrFeedbackNotFound) {
+			t.Fatalf("expected ErrFeedbackNotFound for non-author, got %v", err)
+		}
+	})
+
+	t.Run("submitted entry cannot be deleted", func(t *testing.T) {
+		svc, _, _ := newFeedbackTestService()
+		created, err := svc.CreateDraft(context.Background(), "reviewer-1", completeDraft())
+		if err != nil {
+			t.Fatalf("CreateDraft: %v", err)
+		}
+		if _, err := svc.SubmitDraft(context.Background(), "reviewer-1", created.ID, nil); err != nil {
+			t.Fatalf("SubmitDraft: %v", err)
+		}
+
+		if err := svc.DeleteDraft(context.Background(), "reviewer-1", created.ID); !errors.Is(err, apperror.ErrFeedbackNotFound) {
+			t.Fatalf("expected ErrFeedbackNotFound for submitted entry, got %v", err)
+		}
+	})
+}
+
+func TestFeedback_ListMyDrafts(t *testing.T) {
+	buildDrafts := func(n int) []*model.Feedback {
+		out := make([]*model.Feedback, 0, n)
+		for i := 1; i <= n; i++ {
+			out = append(out, &model.Feedback{
+				ID:         "draft-" + itoa(i),
+				ReviewerID: "reviewer-1",
+				PeriodID:   "period-1",
+				Status:     model.FeedbackStatusDraft,
+				CreatedAt:  time.Unix(int64(i), 0).UTC(),
+			})
+		}
+		return out
+	}
+
+	newService := func(seed []*model.Feedback) *FeedbackService {
+		repo := &fakeFeedbackRepo{drafts: map[string]*model.Feedback{}, claims: map[string]bool{}}
+		for _, d := range seed {
+			stored := *d
+			repo.drafts[d.ID] = &stored
+		}
+		return NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}
+
+	t.Run("returns only the caller's drafts, newest first", func(t *testing.T) {
+		svc := newService(append(buildDrafts(3), &model.Feedback{ID: "other", ReviewerID: "reviewer-2", Status: model.FeedbackStatusDraft, CreatedAt: time.Unix(1, 0).UTC()}))
+
+		got, next, err := svc.ListMyDrafts(context.Background(), "reviewer-1", 0, "")
+		if err != nil {
+			t.Fatalf("ListMyDrafts: %v", err)
+		}
+		if len(got) != 3 {
+			t.Fatalf("got %d drafts, want 3", len(got))
+		}
+		if got[0].ID != "draft-3" {
+			t.Fatalf("expected newest first, got %q first", got[0].ID)
+		}
+		if next != "" {
+			t.Fatalf("expected empty cursor, got %q", next)
+		}
+	})
+
+	t.Run("submitted entries are not listed as drafts", func(t *testing.T) {
+		svc := newService([]*model.Feedback{{ID: "sub", ReviewerID: "reviewer-1", Status: model.FeedbackStatusSubmitted, CreatedAt: time.Unix(1, 0).UTC()}})
+
+		got, _, err := svc.ListMyDrafts(context.Background(), "reviewer-1", 0, "")
+		if err != nil {
+			t.Fatalf("ListMyDrafts: %v", err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("got %d drafts, want 0", len(got))
+		}
+	})
+
+	t.Run("limit and cursor flow to the repository", func(t *testing.T) {
+		repo := &fakeFeedbackRepo{
+			listDraftsFn: func(_ context.Context, reviewerID string, limit int, cursorID string) ([]*model.Feedback, string, error) {
+				if reviewerID != "reviewer-1" || limit != 5 || cursorID != "draft-2" {
+					t.Fatalf("unexpected repo args: %q %d %q", reviewerID, limit, cursorID)
+				}
+				return []*model.Feedback{}, "", nil
+			},
+		}
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		if _, _, err := svc.ListMyDrafts(context.Background(), "reviewer-1", 5, "draft-2"); err != nil {
+			t.Fatalf("ListMyDrafts: %v", err)
+		}
+	})
+
+	t.Run("default and max limits", func(t *testing.T) {
+		var gotLimit int
+		repo := &fakeFeedbackRepo{
+			listDraftsFn: func(_ context.Context, _ string, limit int, _ string) ([]*model.Feedback, string, error) {
+				gotLimit = limit
+				return []*model.Feedback{}, "", nil
+			},
+		}
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		if _, _, err := svc.ListMyDrafts(context.Background(), "reviewer-1", 0, ""); err != nil {
+			t.Fatalf("ListMyDrafts: %v", err)
+		}
+		if gotLimit != DefaultDraftListLimit {
+			t.Fatalf("got default limit %d, want %d", gotLimit, DefaultDraftListLimit)
+		}
+
+		if _, _, err := svc.ListMyDrafts(context.Background(), "reviewer-1", 9999, ""); err != nil {
+			t.Fatalf("ListMyDrafts: %v", err)
+		}
+		if gotLimit != MaxDraftListLimit {
+			t.Fatalf("got capped limit %d, want %d", gotLimit, MaxDraftListLimit)
+		}
+	})
+
+	t.Run("unknown cursor propagates ErrFeedbackNotFound", func(t *testing.T) {
+		svc := newService(buildDrafts(1))
+
+		_, _, err := svc.ListMyDrafts(context.Background(), "reviewer-1", 10, "does-not-exist")
+		if !errors.Is(err, apperror.ErrFeedbackNotFound) {
+			t.Fatalf("expected ErrFeedbackNotFound, got %v", err)
+		}
+	})
+}
+
+func TestFeedback_ListMyGivenFeedbacks(t *testing.T) {
+	buildGiven := func(n int) []*model.Feedback {
+		out := make([]*model.Feedback, 0, n)
+		for i := 1; i <= n; i++ {
+			out = append(out, &model.Feedback{
+				ID:         "given-" + itoa(i),
+				ReviewerID: "reviewer-1",
+				RevieweeID: "reviewee-" + itoa(i),
+				PeriodID:   "period-1",
+				Status:     model.FeedbackStatusSubmitted,
+				CreatedAt:  time.Unix(int64(i), 0).UTC(),
+			})
+		}
+		return out
+	}
+
+	newService := func(seed []*model.Feedback) *FeedbackService {
+		repo := &fakeFeedbackRepo{byReviewee: map[string][]*model.Feedback{}}
+		for _, f := range seed {
+			repo.byReviewee[f.RevieweeID] = append(repo.byReviewee[f.RevieweeID], f)
+		}
+		return NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}
+
+	t.Run("returns only the caller's submitted entries, newest first", func(t *testing.T) {
+		seed := append(buildGiven(3), &model.Feedback{ID: "other", ReviewerID: "reviewer-2", RevieweeID: "reviewee-9", Status: model.FeedbackStatusSubmitted, CreatedAt: time.Unix(1, 0).UTC()})
+		svc := newService(seed)
+
+		got, next, err := svc.ListMyGivenFeedbacks(context.Background(), "reviewer-1", 0, "")
+		if err != nil {
+			t.Fatalf("ListMyGivenFeedbacks: %v", err)
+		}
+		if len(got) != 3 {
+			t.Fatalf("got %d entries, want 3", len(got))
+		}
+		if got[0].ID != "given-3" {
+			t.Fatalf("expected newest first, got %q first", got[0].ID)
+		}
+		if next != "" {
+			t.Fatalf("expected empty cursor, got %q", next)
+		}
+	})
+
+	t.Run("drafts are not listed as given feedback", func(t *testing.T) {
+		svc := newService([]*model.Feedback{{ID: "draft", ReviewerID: "reviewer-1", RevieweeID: "reviewee-1", Status: model.FeedbackStatusDraft, CreatedAt: time.Unix(1, 0).UTC()}})
+
+		got, _, err := svc.ListMyGivenFeedbacks(context.Background(), "reviewer-1", 0, "")
+		if err != nil {
+			t.Fatalf("ListMyGivenFeedbacks: %v", err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("got %d entries, want 0", len(got))
+		}
+	})
+
+	t.Run("limit and cursor flow to the repository", func(t *testing.T) {
+		repo := &fakeFeedbackRepo{
+			listGivenFn: func(_ context.Context, reviewerID string, limit int, cursorID string) ([]*model.Feedback, string, error) {
+				if reviewerID != "reviewer-1" || limit != 5 || cursorID != "given-2" {
+					t.Fatalf("unexpected repo args: %q %d %q", reviewerID, limit, cursorID)
+				}
+				return []*model.Feedback{}, "", nil
+			},
+		}
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		if _, _, err := svc.ListMyGivenFeedbacks(context.Background(), "reviewer-1", 5, "given-2"); err != nil {
+			t.Fatalf("ListMyGivenFeedbacks: %v", err)
+		}
+	})
+
+	t.Run("default and max limits", func(t *testing.T) {
+		var gotLimit int
+		repo := &fakeFeedbackRepo{
+			listGivenFn: func(_ context.Context, _ string, limit int, _ string) ([]*model.Feedback, string, error) {
+				gotLimit = limit
+				return []*model.Feedback{}, "", nil
+			},
+		}
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		if _, _, err := svc.ListMyGivenFeedbacks(context.Background(), "reviewer-1", 0, ""); err != nil {
+			t.Fatalf("ListMyGivenFeedbacks: %v", err)
+		}
+		if gotLimit != DefaultFeedbackListLimit {
+			t.Fatalf("got default limit %d, want %d", gotLimit, DefaultFeedbackListLimit)
+		}
+
+		if _, _, err := svc.ListMyGivenFeedbacks(context.Background(), "reviewer-1", 9999, ""); err != nil {
+			t.Fatalf("ListMyGivenFeedbacks: %v", err)
+		}
+		if gotLimit != MaxFeedbackListLimit {
+			t.Fatalf("got capped limit %d, want %d", gotLimit, MaxFeedbackListLimit)
+		}
+	})
+
+	t.Run("unknown cursor propagates ErrFeedbackNotFound", func(t *testing.T) {
+		svc := newService(buildGiven(1))
+
+		_, _, err := svc.ListMyGivenFeedbacks(context.Background(), "reviewer-1", 10, "does-not-exist")
+		if !errors.Is(err, apperror.ErrFeedbackNotFound) {
+			t.Fatalf("expected ErrFeedbackNotFound, got %v", err)
+		}
+	})
+
+	t.Run("missing reviewer id is a validation error", func(t *testing.T) {
+		svc := newService(nil)
+
+		_, _, err := svc.ListMyGivenFeedbacks(context.Background(), "  ", 10, "")
+		var invalid apperror.ErrInvalidFeedback
+		if !errors.As(err, &invalid) {
+			t.Fatalf("expected ErrInvalidFeedback, got %v", err)
+		}
+	})
+}
+
+func TestFeedback_Create_PeriodWindow(t *testing.T) {
+	t.Run("create during open window succeeds", func(t *testing.T) {
+		svc, _, _ := newFeedbackTestService()
+		if _, err := svc.Create(context.Background(), "reviewer-1", validFeedbackInput()); err != nil {
+			t.Fatalf("Create: unexpected error: %v", err)
+		}
+	})
+
+	t.Run("create before window opens is rejected", func(t *testing.T) {
+		periods := &fakePeriodLookup{}
+		periods.getFn = func(_ context.Context, id string) (*model.FeedbackPeriod, error) {
+			return &model.FeedbackPeriod{ID: id, StartDate: time.Now().Add(24 * time.Hour), EndDate: time.Now().Add(48 * time.Hour)}, nil
+		}
+		repo := &fakeFeedbackRepo{}
+		svc := NewFeedbackService(repo, periods, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		_, err := svc.Create(context.Background(), "reviewer-1", validFeedbackInput())
+		if !errors.Is(err, apperror.ErrFeedbackPeriodClosed) {
+			t.Fatalf("expected ErrFeedbackPeriodClosed, got %v", err)
+		}
+	})
+
+	t.Run("create after window ends is rejected", func(t *testing.T) {
+		periods := &fakePeriodLookup{}
+		periods.getFn = func(_ context.Context, id string) (*model.FeedbackPeriod, error) {
+			return &model.FeedbackPeriod{ID: id, StartDate: time.Now().Add(-48 * time.Hour), EndDate: time.Now().Add(-24 * time.Hour)}, nil
+		}
+		repo := &fakeFeedbackRepo{}
+		svc := NewFeedbackService(repo, periods, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		_, err := svc.Create(context.Background(), "reviewer-1", validFeedbackInput())
+		if !errors.Is(err, apperror.ErrFeedbackPeriodClosed) {
+			t.Fatalf("expected ErrFeedbackPeriodClosed, got %v", err)
 		}
 	})
 }

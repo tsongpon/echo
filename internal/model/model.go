@@ -38,6 +38,26 @@ const (
 	FeedbackVisibilityNamed FeedbackVisibility = "named"
 )
 
+// FeedbackStatus is the lifecycle state of a feedback entry. Entries are
+// either drafts visible only to their author, or submitted entries that count
+// toward the reviewee's feedback.
+type FeedbackStatus string
+
+const (
+	// FeedbackStatusDraft marks a feedback entry that is still being written.
+	// Drafts are visible only to their reviewer; they never appear in the
+	// reviewee's or a manager's feedback listings and are not counted as
+	// filed feedback.
+	FeedbackStatusDraft FeedbackStatus = "draft"
+	// FeedbackStatusSubmitted marks a feedback entry that has been filed. It
+	// is visible to the reviewee and their manager (subject to the visibility
+	// policy). Entries created via POST /v1/feedbacks are submitted
+	// immediately; draft entries transition to submitted via the draft submit
+	// endpoint. Documents written before the status field existed decode
+	// with a "" status, which is normalized to submitted at read time.
+	FeedbackStatusSubmitted FeedbackStatus = "submitted"
+)
+
 type Feedback struct {
 	ID                 string
 	PeriodID           string
@@ -52,8 +72,20 @@ type Feedback struct {
 	StrengthsComment   string
 	WeaknessesComment  string
 	Visibility         FeedbackVisibility
+	Status             FeedbackStatus
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
+}
+
+// NormalizedStatus returns the effective status of the entry, mapping the
+// zero value (a document written before the status field existed) to
+// FeedbackStatusSubmitted. Callers validating or branching on status should
+// use this rather than the raw field.
+func (f *Feedback) NormalizedStatus() FeedbackStatus {
+	if f.Status == "" {
+		return FeedbackStatusSubmitted
+	}
+	return f.Status
 }
 
 type FeedbackPeriod struct {

@@ -30,6 +30,11 @@ tags:
     description: Windows during which feedback can be collected.
   - name: Feedback
     description: Peer feedback entries filed against colleagues.
+  - name: Feedback Drafts
+    description: |
+      Work-in-progress feedback entries private to their author. A draft is
+      started, edited, and finally submitted (at which point it becomes a
+      regular feedback entry), or deleted.
 
 # ----------------------------------------------------------------------------
 # Paths
@@ -433,10 +438,16 @@ paths:
         Validation:
           * `period_id` is required and must refer to an existing feedback
             period (the service validates it before persisting).
+          * The period's date window must be open: now must fall within
+            [start_date, end_date]. A not-yet-open or already-ended period
+            returns `422`.
           * `reviewee_id` is required and must differ from the reviewer.
           * Each of the six score fields must be an integer in [1, 5].
           * `visibility` defaults to `"anonymous"` when omitted or empty, and
             must otherwise be one of `anonymous`, `named`.
+
+        The created entry has `status: "submitted"`. To write feedback
+        incrementally instead, start a draft via `POST /v1/feedback-drafts`.
       operationId: createFeedback
       security:
         - BearerAuth: []
@@ -471,6 +482,15 @@ paths:
           $ref: "#/components/responses/ValidationError"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "422":
+          description: The period's date window is not open (not started or already ended).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                closed:
+                  value: { message: "feedback period is not open for submission" }
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -518,6 +538,372 @@ paths:
                   value: { message: "unknown cursor" }
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/me/given-feedbacks:
+    get:
+      tags: [Feedback]
+      summary: List feedback submitted by the current employee
+      description: |
+        Returns one page of feedback entries the authenticated employee has
+        submitted (i.e. entries they wrote as the reviewer), ordered by
+        `created_at` descending (newest first). The reviewer is the
+        authenticated employee (taken from the JWT subject), so an employee
+        can only list the feedback they gave themselves. Only submitted
+        entries are listed; drafts stay in `GET /v1/feedback-drafts`.
+
+        Pagination is cursor-based: pass the `next_cursor` value from one
+        response as the `cursor` query parameter on the next request. When
+        `next_cursor` is `null` there are no more pages. An unknown cursor
+        (one that does not refer to an existing feedback entry) returns `400`.
+
+        Visibility policy: none applies here — the caller is the reviewer of
+        every entry, so `reviewer_id` is always included, even for anonymous
+        entries (an author always knows their own identity).
+      operationId: listMyGivenFeedbacks
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ListLimit"
+        - $ref: "#/components/parameters/ListCursor"
+      responses:
+        "200":
+          description: One page of given feedback plus the next-page cursor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackGivenListResponse"
+        "400":
+          description: Unknown cursor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                unknownCursor:
+                  value: { message: "unknown cursor" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/feedback-drafts:
+    post:
+      tags: [Feedback Drafts]
+      summary: Start a feedback draft
+      description: |
+        Creates a draft feedback entry owned by the authenticated employee.
+        Unlike `POST /v1/feedbacks`, a draft requires only `period_id` and
+        `reviewee_id`: scores, comments, and visibility may be filled in later
+        via `PATCH /v1/feedback-drafts/{id}`.
+
+        At most one draft may exist per (reviewer, reviewee, period) triple; a
+        duplicate returns `409`. The reviewer cannot draft a self-review
+        (`400`), and `period_id` must refer to an existing period (`400`).
+        The period's date window is intentionally NOT enforced here: a draft
+        may be started before the period opens and will fail at submit time if
+        the window is still shut.
+
+        Supplied scores are bounds-checked ([1, 5]) but not required.
+      operationId: createFeedbackDraft
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateFeedbackDraftRequest"
+            examples:
+              minimal:
+                summary: Start with just the target and period
+                value:
+                  period_id: 0190abcd-0000-7000-8000-000000000000
+                  reviewee_id: 0190bbbb-0000-7000-8000-000000000000
+              partial:
+                summary: Start with some scores already filled
+                value:
+                  period_id: 0190abcd-0000-7000-8000-000000000000
+                  reviewee_id: 0190bbbb-0000-7000-8000-000000000000
+                  communication_score: 4
+                  strengths_comment: work in progress
+                  visibility: anonymous
+      responses:
+        "201":
+          description: The created draft, with status "draft".
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: The reviewer already has a draft for this (reviewee, period) pair.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                exists:
+                  value: { message: "a draft for this reviewee and period already exists" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      tags: [Feedback Drafts]
+      summary: List the caller's feedback drafts
+      description: |
+        Returns one page of the authenticated employee's own draft entries,
+        ordered by `created_at` descending (newest first). Only drafts are
+        listed; feedback entries the caller has already submitted are not
+        included. No reviewer redaction applies: the author always sees their
+        own `reviewer_id`.
+
+        Pagination is cursor-based: pass the `next_cursor` value from one
+        response as the `cursor` query parameter on the next request. When
+        `next_cursor` is `null` there are no more pages. An unknown cursor
+        returns `400 "unknown cursor"`.
+      operationId: listMyFeedbackDrafts
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ListLimit"
+        - $ref: "#/components/parameters/ListCursor"
+      responses:
+        "200":
+          description: One page of the caller's drafts plus the next-page cursor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackDraftListResponse"
+        "400":
+          description: Unknown cursor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                unknownCursor:
+                  value: { message: "unknown cursor" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/feedback-drafts/{id}:
+    get:
+      tags: [Feedback Drafts]
+      summary: Get one of the caller's drafts
+      description: |
+        Returns the named draft when it belongs to the authenticated caller.
+        A draft owned by anyone else — like a draft that does not exist —
+        returns `404` rather than `403`, so a draft's existence never leaks to
+        other employees.
+      operationId: getFeedbackDraft
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DraftId"
+      responses:
+        "200":
+          description: The draft.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No draft matches the ID for this caller.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                notFound:
+                  value: { message: "feedback draft not found" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+    patch:
+      tags: [Feedback Drafts]
+      summary: Update one of the caller's drafts
+      description: |
+        Applies a partial update to the caller's draft. Only fields present in
+        the body are overwritten; omitted fields keep their stored values.
+        `period_id`, `reviewee_id`, and `reviewer_id` are fixed once the draft
+        exists and cannot be changed. Supplied scores are bounds-checked
+        ([1, 5]); comments may be cleared; `visibility` may be set (default
+        `anonymous`) but must be one of `anonymous`, `named`.
+
+        A draft may be incomplete: the full submit-time validation (all six
+        scores required, both comments required, period window open) runs at
+        `POST /v1/feedback-drafts/{id}/submit`, not here.
+      operationId: updateFeedbackDraft
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DraftId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateFeedbackDraftRequest"
+            examples:
+              scores:
+                summary: Fill in two scores, leave the rest untouched
+                value:
+                  communication_score: 4
+                  trust_score: 5
+              clearComment:
+                summary: Clear a comment
+                value:
+                  weaknesses_comment: ""
+      responses:
+        "200":
+          description: The updated draft.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No draft matches the ID for this caller.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                notFound:
+                  value: { message: "feedback draft not found" }
+        "409":
+          description: The draft changed after this request read it; fetch it again and retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                concurrent:
+                  value: { message: "draft was modified concurrently; fetch it again and retry" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags: [Feedback Drafts]
+      summary: Delete one of the caller's drafts
+      description: |
+        Removes the caller's draft and immediately releases its
+        (reviewer, reviewee, period) slot, so a new draft may be started for
+        the same pair right away. Deleting an entry that is missing or no
+        longer a draft returns `404`; submitted feedback is immutable.
+      operationId: deleteFeedbackDraft
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DraftId"
+      responses:
+        "204":
+          description: The draft was deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No draft matches the ID for this caller.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                notFound:
+                  value: { message: "feedback draft not found" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/feedback-drafts/{id}/submit:
+    post:
+      tags: [Feedback Drafts]
+      summary: Submit one of the caller's drafts
+      description: |
+        Transitions the caller's draft to the submitted state and releases its
+        (reviewer, reviewee, period) slot. The request body is optional; when
+        present it carries the same shape as the update request and its fields
+        are applied before validation, letting a client submit and final-edit
+        in one call.
+
+        Full validation runs here:
+          * All six score fields must be present and in [1, 5] (`400`).
+          * `strengths_comment` and `weaknesses_comment` must be non-empty (`400`).
+          * The period's date window must be open — now must fall within
+            [start_date, end_date] (`422`).
+
+        On success the entry behaves exactly like one created via
+        `POST /v1/feedbacks`: it appears in the reviewee's and their manager's
+        listings (subject to the visibility policy).
+      operationId: submitFeedbackDraft
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DraftId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateFeedbackDraftRequest"
+            examples:
+              finalEdit:
+                summary: Fill in the last fields and submit
+                value:
+                  communication_score: 4
+                  leadership_score: 5
+                  technical_score: 3
+                  collaboration_score: 4
+                  delivery_score: 5
+                  trust_score: 2
+                  strengths_comment: great teammate
+                  weaknesses_comment: could document more
+                  visibility: named
+      responses:
+        "200":
+          description: The submitted feedback entry, with status "submitted".
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No draft matches the ID for this caller (or it was already submitted).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                notFound:
+                  value: { message: "feedback draft not found" }
+        "409":
+          description: The draft changed after this request read it; fetch it again and retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                concurrent:
+                  value: { message: "draft was modified concurrently; fetch it again and retry" }
+        "422":
+          description: The period's date window is not open (not started or already ended).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                closed:
+                  value: { message: "feedback period is not open for submission" }
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -760,6 +1146,15 @@ components:
         type: string
       example: 0190aaaa-0000-7000-8000-000000000000
 
+    DraftId:
+      name: id
+      in: path
+      required: true
+      description: The draft feedback entry ID. Must belong to the caller.
+      schema:
+        type: string
+        format: uuid
+
   responses:
     Unauthorized:
       description: Missing or invalid Bearer token.
@@ -833,12 +1228,43 @@ components:
       examples:
         - anonymous
 
+    FeedbackStatus:
+      type: string
+      description: |
+        The lifecycle state of a feedback entry. `draft` entries are private
+        to their author and excluded from the reviewee's and manager's
+        listings; `submitted` entries are visible per the visibility policy.
+        Entries created before the status field existed are reported as
+        `submitted`.
+      enum:
+        - draft
+        - submitted
+      examples:
+        - submitted
+
     Score:
       type: integer
       description: A Likert-style score in the range 1–5.
       minimum: 1
       maximum: 5
       example: 4
+
+    DraftScore:
+      type: integer
+      description: |
+        A score on a feedback entry as stored. Drafts may have 0 for
+        "not filled in yet"; submitted entries always have 1-5.
+      minimum: 0
+      maximum: 5
+      example: 4
+    OptionalScore:
+      type: [integer, "null"]
+      description: |
+        An optionally-supplied score on a draft create/update request. Null
+        (or omitted) leaves the field unset/unchanged; a supplied value must
+        be in 1–5.
+      minimum: 1
+      maximum: 5
 
     EmployeeResponse:
       type: object
@@ -1195,23 +1621,25 @@ components:
           format: uuid
           description: The employee who filed the feedback (from the JWT).
         communication_score:
-          $ref: "#/components/schemas/Score"
+          $ref: "#/components/schemas/DraftScore"
         leadership_score:
-          $ref: "#/components/schemas/Score"
+          $ref: "#/components/schemas/DraftScore"
         technical_score:
-          $ref: "#/components/schemas/Score"
+          $ref: "#/components/schemas/DraftScore"
         collaboration_score:
-          $ref: "#/components/schemas/Score"
+          $ref: "#/components/schemas/DraftScore"
         delivery_score:
-          $ref: "#/components/schemas/Score"
+          $ref: "#/components/schemas/DraftScore"
         trust_score:
-          $ref: "#/components/schemas/Score"
+          $ref: "#/components/schemas/DraftScore"
         strengths_comment:
           type: string
         weaknesses_comment:
           type: string
         visibility:
           $ref: "#/components/schemas/FeedbackVisibility"
+        status:
+          $ref: "#/components/schemas/FeedbackStatus"
         created_at:
           type: string
           format: date-time
@@ -1232,6 +1660,7 @@ components:
         - strengths_comment
         - weaknesses_comment
         - visibility
+        - status
         - created_at
         - updated_at
 
@@ -1272,6 +1701,7 @@ components:
             strengths_comment: great teammate
             weaknesses_comment: could document more
             visibility: named
+            status: submitted
             created_at: "2026-08-18T10:00:00Z"
             updated_at: "2026-08-18T10:00:00Z"
         next_cursor: 0190abcd-0000-7000-8000-000000000000
@@ -1292,3 +1722,154 @@ components:
                 visibility: "anonymous" (the reviewer's identity is hidden from
                 the reviewee). A UUID for visibility: "named" entries.
           required: [reviewer_id]
+    CreateFeedbackDraftRequest:
+      type: object
+      description: |
+        Request body for `POST /v1/feedback-drafts`. The reviewer is taken from
+        the JWT and `reviewer_id` in the body is ignored. Only `period_id` and
+        `reviewee_id` are required; every other field may be filled in later
+        via `PATCH /v1/feedback-drafts/{id}`.
+      properties:
+        period_id:
+          type: string
+          format: uuid
+          description: Must refer to an existing feedback period. The period's date window is not enforced until submit.
+        reviewee_id:
+          type: string
+          format: uuid
+          description: Must differ from the reviewer (no self-review).
+        communication_score:
+          $ref: "#/components/schemas/OptionalScore"
+          description: Optional at draft time; bounds-checked when supplied.
+        leadership_score:
+          $ref: "#/components/schemas/OptionalScore"
+        technical_score:
+          $ref: "#/components/schemas/OptionalScore"
+        collaboration_score:
+          $ref: "#/components/schemas/OptionalScore"
+        delivery_score:
+          $ref: "#/components/schemas/OptionalScore"
+        trust_score:
+          $ref: "#/components/schemas/OptionalScore"
+        strengths_comment:
+          type: string
+          description: Optional at draft time; may be empty.
+        weaknesses_comment:
+          type: string
+          description: Optional at draft time; may be empty.
+        visibility:
+          $ref: "#/components/schemas/FeedbackVisibility"
+          description: Defaults to `anonymous` when omitted or empty.
+      required: [period_id, reviewee_id]
+
+    UpdateFeedbackDraftRequest:
+      type: object
+      description: |
+        Request body for `PATCH /v1/feedback-drafts/{id}` and (optionally)
+        `POST /v1/feedback-drafts/{id}/submit`. Every field is nullable and
+        omitted fields are left unchanged; a supplied field overwrites the
+        stored one. `period_id`, `reviewee_id`, and `reviewer_id` cannot be
+        changed once the draft exists.
+      properties:
+        communication_score:
+          $ref: "#/components/schemas/OptionalScore"
+        leadership_score:
+          $ref: "#/components/schemas/OptionalScore"
+        technical_score:
+          $ref: "#/components/schemas/OptionalScore"
+        collaboration_score:
+          $ref: "#/components/schemas/OptionalScore"
+        delivery_score:
+          $ref: "#/components/schemas/OptionalScore"
+        trust_score:
+          $ref: "#/components/schemas/OptionalScore"
+        strengths_comment:
+          type: [string, "null"]
+          description: Supplied value replaces the stored one; an empty string clears it.
+        weaknesses_comment:
+          type: [string, "null"]
+          description: Supplied value replaces the stored one; an empty string clears it.
+        visibility:
+          type: [string, "null"]
+          description: Must be one of `anonymous`, `named` when supplied.
+
+    FeedbackDraftListResponse:
+      type: object
+      description: |
+        One page of the caller's own draft entries plus the next-page cursor.
+        No reviewer redaction applies: the author always sees their own
+        `reviewer_id`, even on anonymous drafts.
+      properties:
+        drafts:
+          type: array
+          description: The caller's drafts on this page, ordered by created_at descending. Never null (empty array when the caller has no drafts).
+          items:
+            $ref: "#/components/schemas/FeedbackResponse"
+        next_cursor:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            The ID of the last draft on this page; pass it as `cursor` on the
+            next request. Null when there are no more pages.
+      required: [drafts, next_cursor]
+      example:
+        drafts:
+          - id: 0190abcd-0000-7000-8000-000000000000
+            period_id: 0190abca-0000-7000-8000-000000000000
+            reviewee_id: 0190bbbb-0000-7000-8000-000000000000
+            reviewer_id: 0190aaaa-0000-7000-8000-000000000000
+            communication_score: 0
+            leadership_score: 0
+            technical_score: 0
+            collaboration_score: 0
+            delivery_score: 0
+            trust_score: 0
+            strengths_comment: work in progress
+            weaknesses_comment: ""
+            visibility: anonymous
+            status: draft
+            created_at: "2026-08-18T10:00:00Z"
+            updated_at: "2026-08-18T10:00:00Z"
+        next_cursor: null
+
+    FeedbackGivenListResponse:
+      type: object
+      description: |
+        One page of feedback entries the caller has submitted plus the
+        next-page cursor. The caller is the reviewer of every entry, so no
+        reviewer redaction applies: the author always sees their own
+        `reviewer_id`, even on anonymous entries.
+      properties:
+        feedbacks:
+          type: array
+          description: The caller's submitted entries on this page, ordered by created_at descending. Never null (empty array when the caller has given no feedback).
+          items:
+            $ref: "#/components/schemas/FeedbackResponse"
+        next_cursor:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            The ID of the last feedback entry on this page; pass it as `cursor`
+            on the next request. Null when there are no more pages.
+      required: [feedbacks, next_cursor]
+      example:
+        feedbacks:
+          - id: 0190abcd-0000-7000-8000-000000000000
+            period_id: 0190abca-0000-7000-8000-000000000000
+            reviewee_id: 0190bbbb-0000-7000-8000-000000000000
+            reviewer_id: 0190aaaa-0000-7000-8000-000000000000
+            communication_score: 4
+            leadership_score: 5
+            technical_score: 3
+            collaboration_score: 4
+            delivery_score: 5
+            trust_score: 2
+            strengths_comment: great teammate
+            weaknesses_comment: could document more
+            visibility: anonymous
+            status: submitted
+            created_at: "2026-08-18T10:00:00Z"
+            updated_at: "2026-08-18T10:00:00Z"
+        next_cursor: null

@@ -18,6 +18,16 @@ are JSON; responses are JSON. The dev server listens on `http://localhost:1323`.
 | GET    | `/v1/feedback-periods` | Bearer token | List the feedback periods for the caller's organization.        |
 | POST   | `/v1/feedbacks`      | Bearer token   | File a feedback entry for a colleague.                        |
 | GET    | `/v1/me/feedbacks`   | Bearer token   | List feedback received by the current employee (paginated).   |
+| GET    | `/v1/me/given-feedbacks` | Bearer token | List feedback submitted by the current employee (paginated). |
+| POST   | `/v1/feedback-drafts` | Bearer token | Start a feedback draft (at most one per reviewee/period).     |
+| GET    | `/v1/feedback-drafts` | Bearer token | List the caller's feedback drafts (paginated).                |
+| GET    | `/v1/feedback-drafts/:id` | Bearer token | Get one of the caller's drafts.                         |
+| PATCH  | `/v1/feedback-drafts/:id` | Bearer token | Partially update one of the caller's drafts.             |
+| POST   | `/v1/feedback-drafts/:id/submit` | Bearer token | Submit one of the caller's drafts.                |
+| DELETE | `/v1/feedback-drafts/:id` | Bearer token | Delete one of the caller's drafts.                       |
+| GET    | `/v1/me/reports`    | Bearer token   | List the caller's direct reportees (paginated).              |
+| PATCH  | `/v1/employees/:id/manager` | Bearer token¹ | Assign or clear an employee's manager (org admins only). |
+| GET    | `/v1/employees/:id/feedbacks` | Bearer token | List feedback received by a reportee (manager view, paginated). |
 
 ¹ The caller's JWT `role` claim must be `org_admin`; any other role gets `403`.
 
@@ -444,6 +454,10 @@ curl -s -w "\nHTTP %{http_code}\n" -X POST http://localhost:1323/v1/feedbacks \
 | `weaknesses_comment` | yes      | Free text; must not be empty.                                                         |
 | `visibility`         | no       | One of `"anonymous"`, `"named"`. Defaults to `"anonymous"` when omitted or empty. |
 
+The `period_id` must refer to an existing period **whose date window is open**:
+now must fall within `[start_date, end_date]`. A not-yet-open or already-ended
+period returns `422`.
+
 Expected response: `HTTP 201`:
 
 ```json
@@ -461,6 +475,7 @@ Expected response: `HTTP 201`:
   "strengths_comment": "great teammate",
   "weaknesses_comment": "could document more",
   "visibility": "anonymous",
+  "status": "submitted",
   "created_at": "2026-08-18T10:00:00Z",
   "updated_at": "2026-08-18T10:00:00Z"
 }
@@ -471,6 +486,7 @@ Expected response: `HTTP 201`:
 | 400    | `"invalid request body"`                        | Malformed/non-JSON body.                                      |
 | 400    | `"<validation message>"`                        | Missing `period_id`/`reviewee_id`, self-review, a score outside 1–5, or an unknown `visibility`. |
 | 401    | `"missing or invalid token"`                    | No/invalid `Authorization` header or bad token.               |
+| 422    | `"feedback period is not open for submission"`  | The period has not started or has already ended.             |
 | 500    | `"failed to create feedback"`                   | Unexpected server error.                                      |
 
 ---
@@ -542,4 +558,353 @@ An employee who has received no feedback returns `HTTP 200` with
 |--------|-------------------------------------------------|---------------------------------------------------------------|
 | 400    | `"unknown cursor"`                              | `cursor` does not refer to an existing feedback entry.         |
 | 401    | `"missing or invalid token"`                    | No/invalid `Authorization` header or bad token.               |
-| 500    | `"failed to list feedbacks"`                    | Unexpected server error.                                      |
+| 500    | `"failed to list feedbacks"`                    | Unexpected server error.                                     |
+---
+
+## List My Given Feedback
+
+`GET /v1/me/given-feedbacks` — returns one page of feedback entries the
+authenticated employee has submitted (i.e. entries they wrote as the
+reviewer), ordered by `created_at` descending (newest first). Requires a
+valid `Bearer` JWT. The reviewer is taken from the caller's JWT subject, so
+an employee can only list the feedback they gave themselves. Only submitted
+entries are listed; drafts stay in `GET /v1/feedback-drafts`.
+
+Visibility policy: none applies here — the caller is the reviewer of every
+entry, so `reviewer_id` is always included, even for anonymous entries (an
+author always knows their own identity).
+
+Pagination is cursor-based and controlled by the same two optional query
+parameters as `GET /v1/me/feedbacks`:
+
+| Parameter | Default | Notes                                                                                  |
+|-----------|---------|----------------------------------------------------------------------------------------|
+| `limit`   | `20`    | Page size. Non-numeric or `<= 0` falls back to the default; values above `100` are capped. |
+| `cursor`  | —       | The `next_cursor` value from the previous page (a feedback ID). Omit on the first page. An unknown cursor returns `400`. |
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X GET "http://localhost:1323/v1/me/given-feedbacks?limit=20" \
+  -H "Authorization: Bearer <access_token>"
+```
+
+Expected response: `HTTP 200`:
+
+```json
+{
+  "feedbacks": [
+    {
+      "id": "0190abcd-...",
+      "period_id": "0190abca-...",
+      "reviewee_id": "0190bbbb-...",
+      "reviewer_id": "<authenticated employee id>",
+      "communication_score": 4,
+      "leadership_score": 5,
+      "technical_score": 3,
+      "collaboration_score": 4,
+      "delivery_score": 5,
+      "trust_score": 2,
+      "strengths_comment": "great teammate",
+      "weaknesses_comment": "could document more",
+      "visibility": "anonymous",
+      "status": "submitted",
+      "created_at": "2026-08-18T10:00:00Z",
+      "updated_at": "2026-08-18T10:00:00Z"
+    }
+  ],
+  "next_cursor": null
+}
+```
+
+An employee who has given no feedback returns `HTTP 200` with
+`{"feedbacks": [], "next_cursor": null}`.
+
+| Status | `message`                                       | When                                                          |
+|--------|-------------------------------------------------|---------------------------------------------------------------|
+| 400    | `"unknown cursor"`                              | `cursor` does not refer to an existing feedback entry.         |
+| 401    | `"missing or invalid token"`                    | No/invalid `Authorization` header or bad token.               |
+| 500    | `"failed to list feedbacks"`                    | Unexpected server error.                                     |
+---
+
+## Create Feedback Draft
+
+`POST /v1/feedback-drafts` — starts a draft feedback entry owned by the
+authenticated employee. Requires a valid `Bearer` JWT. Unlike
+`POST /v1/feedbacks`, a draft requires only the target and period: scores,
+comments, and visibility may be filled in later via `PATCH /v1/feedback-drafts/:id`.
+
+At most one draft may exist per (reviewer, reviewee, period) triple; a
+duplicate returns `409`. The period's date window is intentionally **not**
+enforced here: a draft may be started before the period opens and will fail
+at submit time if the window is still shut.
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X POST http://localhost:1323/v1/feedback-drafts \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "period_id": "0190abcd-...",
+    "reviewee_id": "<colleague employee id>",
+    "communication_score": 4,
+    "strengths_comment": "work in progress",
+    "visibility": "anonymous"
+  }'
+```
+
+| Field                | Required | Notes                                                                                  |
+|----------------------|----------|----------------------------------------------------------------------------------------|
+| `period_id`          | yes      | Must refer to an existing feedback period. The period's date window is not enforced yet. |
+| `reviewee_id`        | yes      | Must differ from the reviewer (no self-review).                                        |
+| `communication_score`| no       | Integer 1–5 when supplied; may be filled in later.                                     |
+| `leadership_score`   | no       | Integer 1–5 when supplied.                                                              |
+| `technical_score`    | no       | Integer 1–5 when supplied.                                                              |
+| `collaboration_score`| no       | Integer 1–5 when supplied.                                                              |
+| `delivery_score`     | no       | Integer 1–5 when supplied.                                                              |
+| `trust_score`        | no       | Integer 1–5 when supplied.                                                              |
+| `strengths_comment`  | no       | Free text; may be empty.                                                               |
+| `weaknesses_comment` | no       | Free text; may be empty.                                                               |
+| `visibility`         | no       | One of `"anonymous"`, `"named"`. Defaults to `"anonymous"` when omitted or empty.      |
+
+Expected response: `HTTP 201`:
+
+```json
+{
+  "id": "0190abcf-...",
+  "period_id": "0190abcd-...",
+  "reviewee_id": "<colleague employee id>",
+  "reviewer_id": "<authenticated employee id>",
+  "communication_score": 4,
+  "leadership_score": 0,
+  "technical_score": 0,
+  "collaboration_score": 0,
+  "delivery_score": 0,
+  "trust_score": 0,
+  "strengths_comment": "work in progress",
+  "weaknesses_comment": "",
+  "visibility": "anonymous",
+  "status": "draft",
+  "created_at": "2026-08-18T10:00:00Z",
+  "updated_at": "2026-08-18T10:00:00Z"
+}
+```
+
+Unfilled scores are `0` on a draft; they must all be set (1–5) before
+submission.
+
+| Status | `message`                                             | When                                                  |
+|--------|-------------------------------------------------------|-------------------------------------------------------|
+| 400    | `"invalid request body"`                              | Malformed/non-JSON body.                              |
+| 400    | `"<validation message>"`                              | Missing `period_id`/`reviewee_id`, self-review, a supplied score outside 1–5, or an unknown `visibility`. |
+| 401    | `"missing or invalid token"`                          | No/invalid `Authorization` header or bad token.       |
+| 409    | `"a draft for this reviewee and period already exists"` | The reviewer already has a draft for this pair.     |
+| 500    | `"failed"`                                            | Unexpected server error.                              |
+
+---
+
+## List My Feedback Drafts
+
+`GET /v1/feedback-drafts` — returns one page of the authenticated employee's
+own draft entries, ordered by `created_at` descending (newest first). Only
+drafts are listed; entries the caller has already submitted are not included.
+No reviewer redaction applies: the author always sees their own `reviewer_id`.
+
+Pagination is cursor-based and controlled by two optional query parameters:
+
+| Parameter | Default | Notes                                                                                  |
+|-----------|---------|----------------------------------------------------------------------------------------|
+| `limit`   | `20`    | Page size. Non-numeric or `<= 0` falls back to the default; values above `100` are capped. |
+| `cursor`  | —       | The `next_cursor` value from the previous page (a draft ID). Omit on the first page. An unknown cursor returns `400`. |
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X GET "http://localhost:1323/v1/feedback-drafts?limit=20" \
+  -H "Authorization: Bearer <access_token>"
+```
+
+Expected response: `HTTP 200`:
+
+```json
+{
+  "drafts": [
+    {
+      "id": "0190abcf-...",
+      "period_id": "0190abcd-...",
+      "reviewee_id": "<colleague employee id>",
+      "reviewer_id": "<authenticated employee id>",
+      "communication_score": 4,
+      "leadership_score": 0,
+      "technical_score": 0,
+      "collaboration_score": 0,
+      "delivery_score": 0,
+      "trust_score": 0,
+      "strengths_comment": "work in progress",
+      "weaknesses_comment": "",
+      "visibility": "anonymous",
+      "status": "draft",
+      "created_at": "2026-08-18T10:00:00Z",
+      "updated_at": "2026-08-18T10:00:00Z"
+    }
+  ],
+  "next_cursor": null
+}
+```
+
+| Status | `message`                    | When                                            |
+|--------|------------------------------|-------------------------------------------------|
+| 400    | `"unknown cursor"`           | `cursor` does not refer to an existing draft.    |
+| 401    | `"missing or invalid token"` | No/invalid `Authorization` header or bad token. |
+| 500    | `"failed to list feedback drafts"` | Unexpected server error.                 |
+
+---
+
+## Get Feedback Draft
+
+`GET /v1/feedback-drafts/:id` — returns the named draft when it belongs to the
+authenticated caller. A draft owned by anyone else — like a draft that does not
+exist — returns `404` rather than `403`, so a draft's existence never leaks to
+other employees.
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X GET "http://localhost:1323/v1/feedback-drafts/<draft id>" \
+  -H "Authorization: Bearer <access_token>"
+```
+
+Expected response: `HTTP 200` with the draft JSON (same shape as create).
+
+| Status | `message`                      | When                                            |
+|--------|--------------------------------|-------------------------------------------------|
+| 401    | `"missing or invalid token"`   | No/invalid `Authorization` header or bad token. |
+| 404    | `"feedback draft not found"`   | No draft with this ID belongs to the caller.    |
+| 500    | `"failed"`                     | Unexpected server error.                        |
+
+---
+
+## Update Feedback Draft
+
+`PATCH /v1/feedback-drafts/:id` — applies a partial update to the caller's
+draft. Only fields present in the body are overwritten; omitted fields keep
+their stored values. `period_id`, `reviewee_id`, and `reviewer_id` are fixed
+once the draft exists. A draft may stay incomplete; the full submit-time
+validation runs at submit, not here.
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X PATCH "http://localhost:1323/v1/feedback-drafts/<draft id>" \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "communication_score": 4,
+    "trust_score": 5,
+    "strengths_comment": "great teammate"
+  }'
+```
+
+| Field                | Required | Notes                                                        |
+|----------------------|----------|--------------------------------------------------------------|
+| `communication_score`| no       | Integer 1–5. Omitted → unchanged.                           |
+| `leadership_score`   | no       | Integer 1–5. Omitted → unchanged.                            |
+| `technical_score`    | no       | Integer 1–5. Omitted → unchanged.                           |
+| `collaboration_score`| no       | Integer 1–5. Omitted → unchanged.                           |
+| `delivery_score`     | no       | Integer 1–5. Omitted → unchanged.                            |
+| `trust_score`        | no       | Integer 1–5. Omitted → unchanged.                            |
+| `strengths_comment`  | no       | Free text. An empty string clears it; omitted → unchanged.   |
+| `weaknesses_comment` | no       | Free text. An empty string clears it; omitted → unchanged.  |
+| `visibility`         | no       | One of `"anonymous"`, `"named"`. Omitted → unchanged.        |
+
+Expected response: `HTTP 200` with the updated draft JSON.
+
+| Status | `message`                                                 | When                                              |
+|--------|-----------------------------------------------------------|---------------------------------------------------|
+| 400    | `"invalid request body"`                                  | Malformed/non-JSON body.                          |
+| 400    | `"<validation message>"`                                  | A supplied score outside 1–5, or unknown `visibility`. |
+| 401    | `"missing or invalid token"`                              | No/invalid `Authorization` header or bad token.   |
+| 404    | `"feedback draft not found"`                              | No draft with this ID belongs to the caller.      |
+| 409    | `"draft was modified concurrently; fetch it again and retry"` | The draft changed after this request read it. |
+| 500    | `"failed"`                                                | Unexpected server error.                          |
+
+---
+
+## Submit Feedback Draft
+
+`POST /v1/feedback-drafts/:id/submit` — submits the caller's draft,
+transitioning it to the submitted state and releasing its
+(reviewer, reviewee, period) slot so a new draft may be started immediately.
+The request body is optional; when present it carries the same shape as the
+update request and its fields are applied before validation (submit and
+final-edit in one call).
+
+Full validation runs here: all six scores must be present and in 1–5, both
+comments must be non-empty, and the period's date window must be open.
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X POST "http://localhost:1323/v1/feedback-drafts/<draft id>/submit" \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "communication_score": 4,
+    "leadership_score": 5,
+    "technical_score": 3,
+    "collaboration_score": 4,
+    "delivery_score": 5,
+    "trust_score": 2,
+    "strengths_comment": "great teammate",
+    "weaknesses_comment": "could document more",
+    "visibility": "named"
+  }'
+```
+
+Expected response: `HTTP 200`:
+
+```json
+{
+  "id": "0190abcf-...",
+  "period_id": "0190abcd-...",
+  "reviewee_id": "<colleague employee id>",
+  "reviewer_id": "<authenticated employee id>",
+  "communication_score": 4,
+  "leadership_score": 5,
+  "technical_score": 3,
+  "collaboration_score": 4,
+  "delivery_score": 5,
+  "trust_score": 2,
+  "strengths_comment": "great teammate",
+  "weaknesses_comment": "could document more",
+  "visibility": "named",
+  "status": "submitted",
+  "created_at": "2026-08-18T10:00:00Z",
+  "updated_at": "2026-08-18T11:00:00Z"
+}
+```
+
+After submission the entry behaves exactly like one created via
+`POST /v1/feedbacks`: it appears in the reviewee's and their manager's
+listings (subject to the visibility policy) and can no longer be edited.
+
+| Status | `message`                                             | When                                                  |
+|--------|-------------------------------------------------------|-------------------------------------------------------|
+| 400    | `"invalid request body"`                              | Malformed/non-JSON body.                              |
+| 400    | `"<validation message>"`                              | A missing score, an empty comment, or an unknown `visibility`. |
+| 401    | `"missing or invalid token"`                          | No/invalid `Authorization` header or bad token.       |
+| 404    | `"feedback draft not found"`                          | No draft with this ID belongs to the caller (or it was already submitted). |
+| 409    | `"draft was modified concurrently; fetch it again and retry"` | The draft changed after this request read it.   |
+| 422    | `"feedback period is not open for submission"`        | The period has not started or has already ended.      |
+| 500    | `"failed"`                                            | Unexpected server error.                              |
+
+---
+
+## Delete Feedback Draft
+
+`DELETE /v1/feedback-drafts/:id` — removes the caller's draft and immediately
+releases its (reviewer, reviewee, period) slot, so a new draft may be started
+for the same pair right away. Deleting an entry that is missing or no longer a
+draft returns `404`; submitted feedback is immutable.
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X DELETE "http://localhost:1323/v1/feedback-drafts/<draft id>" \
+  -H "Authorization: Bearer <access_token>"
+```
+
+Expected response: `HTTP 204` with an empty body.
+
+| Status | `message`                      | When                                            |
+|--------|--------------------------------|-------------------------------------------------|
+| 401    | `"missing or invalid token"`   | No/invalid `Authorization` header or bad token. |
+| 404    | `"feedback draft not found"`   | No draft with this ID belongs to the caller.    |
+| 500    | `"failed"`                     | Unexpected server error.                        |

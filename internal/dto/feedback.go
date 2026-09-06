@@ -31,9 +31,80 @@ type CreateFeedbackRequest struct {
 	Visibility         model.FeedbackVisibility `json:"visibility"`
 }
 
+// CreateFeedbackDraftRequest is the request body for POST /v1/feedback-drafts.
+// As with the create endpoint, the reviewer is taken from the authenticated
+// employee's JWT; reviewer_id in the body is ignored. Unlike a submitted
+// entry, a draft requires only the reviewee and period: scores and comments
+// may be filled in later via the update endpoint.
+type CreateFeedbackDraftRequest struct {
+	PeriodID           string                   `json:"period_id"`
+	RevieweeID         string                   `json:"reviewee_id"`
+	CommunicationScore *int                     `json:"communication_score"`
+	LeadershipScore    *int                     `json:"leadership_score"`
+	TechnicalScore     *int                     `json:"technical_score"`
+	CollaborationScore *int                     `json:"collaboration_score"`
+	DeliveryScore      *int                     `json:"delivery_score"`
+	TrustScore         *int                     `json:"trust_score"`
+	StrengthsComment   string                   `json:"strengths_comment"`
+	WeaknessesComment  string                   `json:"weaknesses_comment"`
+	Visibility         model.FeedbackVisibility `json:"visibility"`
+}
+
+// UpdateFeedbackDraftRequest is the request body for
+// PATCH /v1/feedback-drafts/:id. All fields are pointers so the request can
+// distinguish an omitted field (left unchanged) from an explicitly supplied
+// one (overwritten); period_id, reviewee_id, and reviewer_id are fixed once
+// the draft is created and are therefore not accepted here.
+type UpdateFeedbackDraftRequest struct {
+	CommunicationScore *int                      `json:"communication_score"`
+	LeadershipScore    *int                      `json:"leadership_score"`
+	TechnicalScore     *int                      `json:"technical_score"`
+	CollaborationScore *int                      `json:"collaboration_score"`
+	DeliveryScore      *int                      `json:"delivery_score"`
+	TrustScore         *int                      `json:"trust_score"`
+	StrengthsComment   *string                   `json:"strengths_comment"`
+	WeaknessesComment  *string                   `json:"weaknesses_comment"`
+	Visibility         *model.FeedbackVisibility `json:"visibility"`
+}
+
+// ToFeedback maps a draft create request to a domain Feedback in the draft
+// state. Omitted scores decode to their zero values, which the service's
+// draft validation accepts (draft scores are only bounds-checked, never
+// required). The reviewer ID is set by the service from the authenticated
+// caller.
+func (r CreateFeedbackDraftRequest) ToFeedback() *model.Feedback {
+	feedback := &model.Feedback{
+		PeriodID:          r.PeriodID,
+		RevieweeID:        r.RevieweeID,
+		StrengthsComment:  r.StrengthsComment,
+		WeaknessesComment: r.WeaknessesComment,
+		Visibility:        r.Visibility,
+		Status:            model.FeedbackStatusDraft,
+	}
+	if r.CommunicationScore != nil {
+		feedback.CommunicationScore = *r.CommunicationScore
+	}
+	if r.LeadershipScore != nil {
+		feedback.LeadershipScore = *r.LeadershipScore
+	}
+	if r.TechnicalScore != nil {
+		feedback.TechnicalScore = *r.TechnicalScore
+	}
+	if r.CollaborationScore != nil {
+		feedback.CollaborationScore = *r.CollaborationScore
+	}
+	if r.DeliveryScore != nil {
+		feedback.DeliveryScore = *r.DeliveryScore
+	}
+	if r.TrustScore != nil {
+		feedback.TrustScore = *r.TrustScore
+	}
+	return feedback
+}
+
 // FeedbackResponse is the representation of a feedback entry returned to
 // clients. It mirrors model.Feedback so the client can show the scores,
-// comments, visibility, and lifecycle timestamps.
+// comments, visibility, lifecycle status, and lifecycle timestamps.
 type FeedbackResponse struct {
 	ID                 string                   `json:"id"`
 	PeriodID           string                   `json:"period_id"`
@@ -48,6 +119,7 @@ type FeedbackResponse struct {
 	StrengthsComment   string                   `json:"strengths_comment"`
 	WeaknessesComment  string                   `json:"weaknesses_comment"`
 	Visibility         model.FeedbackVisibility `json:"visibility"`
+	Status             model.FeedbackStatus     `json:"status"`
 	CreatedAt          time.Time                `json:"created_at"`
 	UpdatedAt          time.Time                `json:"updated_at"`
 }
@@ -69,6 +141,7 @@ func (r CreateFeedbackRequest) ToFeedback() *model.Feedback {
 		StrengthsComment:   r.StrengthsComment,
 		WeaknessesComment:  r.WeaknessesComment,
 		Visibility:         r.Visibility,
+		Status:             model.FeedbackStatusSubmitted,
 	}
 }
 
@@ -91,6 +164,7 @@ func ToFeedbackResponse(f *model.Feedback) FeedbackResponse {
 		StrengthsComment:   f.StrengthsComment,
 		WeaknessesComment:  f.WeaknessesComment,
 		Visibility:         f.Visibility,
+		Status:             f.NormalizedStatus(),
 		CreatedAt:          f.CreatedAt,
 		UpdatedAt:          f.UpdatedAt,
 	}
@@ -131,4 +205,58 @@ func ToFeedbackListResponse(feedbacks []*model.Feedback, nextCursorID string) Fe
 		cursor = &c
 	}
 	return FeedbackListResponse{Feedbacks: out, NextCursor: cursor}
+}
+
+// FeedbackDraftListResponse is the paginated wrapper returned by
+// GET /v1/feedback-drafts: the authenticated caller's own draft entries,
+// ordered by created_at descending. As with FeedbackListResponse the drafts
+// slice is never nil.
+type FeedbackDraftListResponse struct {
+	Drafts     []FeedbackResponse `json:"drafts"`
+	NextCursor *string            `json:"next_cursor"`
+}
+
+// ToFeedbackDraftListResponse maps a slice of the caller's drafts to the
+// draft list response shape. The caller is the reviewer of every entry, so
+// no reviewer redaction applies: an author always knows their own identity
+// regardless of the entry's visibility. nextCursorID semantics match
+// ToFeedbackListResponse.
+func ToFeedbackDraftListResponse(drafts []*model.Feedback, nextCursorID string) FeedbackDraftListResponse {
+	out := make([]FeedbackResponse, 0, len(drafts))
+	for _, f := range drafts {
+		out = append(out, ToFeedbackResponse(f))
+	}
+	var cursor *string
+	if nextCursorID != "" {
+		c := nextCursorID
+		cursor = &c
+	}
+	return FeedbackDraftListResponse{Drafts: out, NextCursor: cursor}
+}
+
+// FeedbackGivenListResponse is the paginated wrapper returned by
+// GET /v1/me/given-feedbacks: feedback entries the authenticated caller
+// has submitted, ordered by created_at descending. As with
+// FeedbackListResponse the feedbacks slice is never nil.
+type FeedbackGivenListResponse struct {
+	Feedbacks  []FeedbackResponse `json:"feedbacks"`
+	NextCursor *string            `json:"next_cursor"`
+}
+
+// ToFeedbackGivenListResponse maps a slice of the caller's submitted
+// feedback entries to the given-feedback list response shape. The caller is
+// the reviewer of every entry, so no reviewer redaction applies: an author
+// always knows their own identity regardless of the entry's visibility.
+// nextCursorID semantics match ToFeedbackListResponse.
+func ToFeedbackGivenListResponse(feedbacks []*model.Feedback, nextCursorID string) FeedbackGivenListResponse {
+	out := make([]FeedbackResponse, 0, len(feedbacks))
+	for _, f := range feedbacks {
+		out = append(out, ToFeedbackResponse(f))
+	}
+	var cursor *string
+	if nextCursorID != "" {
+		c := nextCursorID
+		cursor = &c
+	}
+	return FeedbackGivenListResponse{Feedbacks: out, NextCursor: cursor}
 }

@@ -82,6 +82,24 @@ func IsInvalidFeedbackPeriod(err error) bool {
 	return errors.As(err, &target)
 }
 
+// ErrFeedbackDraftAlreadyExists is returned when the reviewer already has a
+// draft for the same (reviewee, period) pair. A unique-constraint ledger
+// document backs this rule, so it is enforced atomically at create time.
+var ErrFeedbackDraftAlreadyExists = errors.New("a draft for this reviewee and period already exists")
+
+// ErrFeedbackPeriodClosed is returned when feedback is submitted outside the
+// period's date window (before start_date or after end_date). The period's
+// existence is a separate check (ErrFeedbackPeriodNotFound); this one means
+// the period exists but is not open for submission.
+var ErrFeedbackPeriodClosed = errors.New("feedback period is not open for submission")
+
+// ErrFeedbackConcurrentUpdate is returned when a feedback draft changed
+// between the caller's read and the write, so the write was rejected rather
+// than allowed to overwrite the newer state. The caller may retry with a
+// fresh read. It is defined here rather than in the repository package so
+// the handler can map it to a 409 without importing lower layers.
+var ErrFeedbackConcurrentUpdate = errors.New("feedback draft was modified concurrently")
+
 // ErrInvalidFeedback indicates a validation failure of a feedback input. It
 // carries a human-readable message describing the failed validation.
 type ErrInvalidFeedback string
