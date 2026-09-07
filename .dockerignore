@@ -1,0 +1,21 @@
+# Never bake secrets into the build context
+.env
+.env.*
+!.env.example
+
+# VCS and CI
+.git
+.github
+.gitignore
+
+# Docs and non-runtime files
+docs
+api-test.md
+frontend-handoff
+.spectral.yaml
+.DS_Store
+.idea
+.vscode
+
+# Local build artifacts
+bin
