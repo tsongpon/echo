@@ -84,13 +84,13 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/api:${{ steps.meta.outputs.sha_short }}
-            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/api:main
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}:${{ steps.meta.outputs.sha_short }}
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}:main
           # Registry cache backend: stores BuildKit cache as a separate image
           # ref in Artifact Registry. More reliable than the gha backend and
           # has no GitHub cache size limits.
-          cache-from: type=registry,ref=${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/api:buildcache
-          cache-to: type=registry,ref=${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/api:buildcache,mode=max
+          cache-from: type=registry,ref=${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}:buildcache
+          cache-to: type=registry,ref=${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}:buildcache,mode=max
 
   # ---------------------------------------------------------------
   # 3. Deploy to production on Cloud Run. Depends on the image push.
@@ -122,7 +122,7 @@ jobs:
         with:
           service: ${{ env.CLOUD_RUN_SERVICE }}
           region: ${{ env.GCP_REGION }}
-          image: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/api:${{ steps.meta.outputs.sha_short }}
+          image: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}:${{ steps.meta.outputs.sha_short }}
           # Public access: allUsers gets roles/run.invoker on every deploy.
           # The runtime service account Cloud Run uses for Firestore access.
           flags: >-
