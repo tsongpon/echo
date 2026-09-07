@@ -16,7 +16,7 @@ env:
   # Image ref format: {REGION}-docker.pkg.dev/{PROJECT}/{ARTIFACT_REPO}/{IMAGE_NAME}:{TAG}
   GCP_REGION: asia-southeast1
   ARTIFACT_REPO: echo
-  IMAGE_NAME: api
+  IMAGE_NAME: echo
   CLOUD_RUN_SERVICE: echo
 
 permissions:
