@@ -83,8 +83,11 @@ jobs:
           tags: |
             ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/api:${{ steps.meta.outputs.sha_short }}
             ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/api:main
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Registry cache backend: stores BuildKit cache as a separate image
+          # ref in Artifact Registry. More reliable than the gha backend and
+          # has no GitHub cache size limits.
+          cache-from: type=registry,ref=${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/api:buildcache
+          cache-to: type=registry,ref=${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/api:buildcache,mode=max
 
   # ---------------------------------------------------------------
   # 3. Deploy to production on Cloud Run. Depends on the image push.
