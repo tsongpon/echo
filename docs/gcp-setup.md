@@ -108,6 +108,9 @@ set environment variables. The workflow later only updates the image.
 ```bash
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/api:main"
 
+# Note: --image uses {REGION}-docker.pkg.dev/{PROJECT}/{REPO}/{IMAGE} — three
+# path components after the host. "${AR_REPO}:main" alone would be invalid.
+
 gcloud run deploy "$RUN_SERVICE" \
   --region="$REGION" \
   --image="$IMAGE" \
@@ -169,6 +172,7 @@ Add these under **Settings → Secrets and actions → Actions → New repositor
 |---|---|
 | `GCP_PROJECT_ID` | `$PROJECT_ID` |
 | `GCP_WIF_PROVIDER` | `projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool/providers/github-provider` |
+| `GCP_DEPLOYER_SA_EMAIL` | `${DEPLOYER_SA}@${PROJECT_ID}.iam.gserviceaccount.com` — the SA GitHub Actions impersonates (needs `roles/run.admin`, `roles/artifactregistry.writer`, `roles/iam.serviceAccountUser`) |
 | `CLOUD_RUN_RUNTIME_SA_EMAIL` | `${RUNTIME_SA}@${PROJECT_ID}.iam.gserviceaccount.com` |
 
 ## 7. GitHub environment (optional, recommended)

@@ -12,9 +12,11 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # Adjust these three if your GCP naming differs. See docs/gcp-setup.md.
+  # Adjust these if your GCP naming differs. See docs/gcp-setup.md.
+  # Image ref format: {REGION}-docker.pkg.dev/{PROJECT}/{ARTIFACT_REPO}/{IMAGE_NAME}:{TAG}
   GCP_REGION: asia-southeast1
   ARTIFACT_REPO: echo
+  IMAGE_NAME: api
   CLOUD_RUN_SERVICE: echo
 
 permissions:
@@ -60,16 +62,24 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Authenticate to GCP (Workload Identity Federation)
+        id: auth
         uses: google-github-actions/auth@v2
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          # Impersonate the deployer SA: the raw federated identity has no IAM
+          # roles, so pushes/deploys must act as this service account.
+          service_account: ${{ secrets.GCP_DEPLOYER_SA_EMAIL }}
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
       - name: Authenticate Docker to Artifact Registry
-        run: gcloud auth configure-docker ${{ env.GCP_REGION }}-docker.pkg.dev --quiet
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.GCP_REGION }}-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
 
       - name: Set up Buildx (docker-container driver for registry cache)
         uses: docker/setup-buildx-action@v3
@@ -84,13 +94,13 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}:${{ steps.meta.outputs.sha_short }}
-            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}:main
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.sha_short }}
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:main
           # Registry cache backend: stores BuildKit cache as a separate image
           # ref in Artifact Registry. More reliable than the gha backend and
           # has no GitHub cache size limits.
-          cache-from: type=registry,ref=${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}:buildcache
-          cache-to: type=registry,ref=${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}:buildcache,mode=max
+          cache-from: type=registry,ref=${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:buildcache,mode=max
 
   # ---------------------------------------------------------------
   # 3. Deploy to production on Cloud Run. Depends on the image push.
@@ -104,10 +114,14 @@ jobs:
     environment: production
     steps:
       - name: Authenticate to GCP (Workload Identity Federation)
+        id: auth
         uses: google-github-actions/auth@v2
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          # Impersonate the deployer SA: the raw federated identity has no IAM
+          # roles, so pushes/deploys must act as this service account.
+          service_account: ${{ secrets.GCP_DEPLOYER_SA_EMAIL }}
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
@@ -122,7 +136,7 @@ jobs:
         with:
           service: ${{ env.CLOUD_RUN_SERVICE }}
           region: ${{ env.GCP_REGION }}
-          image: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}:${{ steps.meta.outputs.sha_short }}
+          image: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.sha_short }}
           # Public access: allUsers gets roles/run.invoker on every deploy.
           # The runtime service account Cloud Run uses for Firestore access.
           flags: >-
