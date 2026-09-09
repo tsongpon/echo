@@ -129,6 +129,53 @@ jobs:
         id: meta
         run: echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
+      - name: Compose Cloud Run env vars
+        id: runenv
+        env:
+          # Required GCP config.
+          FIRESTORE_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          # Optional: unset values are omitted below, which preserves the
+          # value already set on the Cloud Run service.
+          FIRESTORE_DATABASE_NAME: ${{ vars.FIRESTORE_DATABASE_NAME }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          APP_BASE_URL: ${{ vars.APP_BASE_URL }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          RESEND_FROM_EMAIL: ${{ vars.RESEND_FROM_EMAIL }}
+        run: |
+          set -euo pipefail
+
+          # Build the comma-separated KEY=VALUE list for --set-env-vars.
+          # gcloud replaces only the listed keys, so anything omitted here
+          # keeps the value already configured on the service (out-of-band
+          # gcloud/console config survives CI deploys). Values must not
+          # contain commas.
+          env_list="FIRESTORE_PROJECT_ID=${FIRESTORE_PROJECT_ID}"
+          env_list="${env_list},FIRESTORE_DATABASE_NAME=${FIRESTORE_DATABASE_NAME:-(default)}"
+
+          if [ -n "${JWT_SECRET}" ]; then
+            # The server refuses to start with a short configured secret
+            # (see minJWTSecretLen in cmd/server/main.go); fail the deploy
+            # here with a clear message instead of shipping a revision
+            # that crash-loops at startup.
+            if [ "${#JWT_SECRET}" -lt 32 ]; then
+              echo "::error::JWT_SECRET secret is set but is shorter than 32 characters; refusing to deploy."
+              exit 1
+            fi
+            env_list="${env_list},JWT_SECRET=${JWT_SECRET}"
+          else
+            echo "::warning::JWT_SECRET not configured in the repo; keeping the value already set on the service."
+          fi
+
+          for kv in "APP_BASE_URL=${APP_BASE_URL}" "RESEND_API_KEY=${RESEND_API_KEY}" "RESEND_FROM_EMAIL=${RESEND_FROM_EMAIL}"; do
+            key="${kv%%=*}"
+            value="${kv#*=}"
+            if [ -n "${value}" ]; then
+              env_list="${env_list},${key}=${value}"
+            fi
+          done
+
+          echo "env_vars=${env_list}" >> "$GITHUB_OUTPUT"
+
       - name: Deploy to Cloud Run
         id: deploy
         uses: google-github-actions/deploy-cloudrun@v3
@@ -138,18 +185,13 @@ jobs:
           image: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.sha_short }}
           # Public access: allUsers gets roles/run.invoker on every deploy.
           # The runtime service account Cloud Run uses for Firestore access.
-          # Env vars:
-          #   FIRESTORE_PROJECT_ID   - GCP project hosting Firestore.
-          #   FIRESTORE_DATABASE_NAME - Firestore database ID within the
-          #     project. Default "(default)" when unset; needed only for a
-          #     non-default database.
-          #   JWT_SECRET et al. are managed out-of-band (gcloud / console) and
-          #     are preserved by Cloud Run on redeploy; this step only pins the
-          #     listed env vars to their current values.
+          # Env vars come from the compose step above; gcloud replaces only
+          # the listed keys, so out-of-band config on the service is
+          # preserved.
           flags: >-
             --service-account=${{ secrets.CLOUD_RUN_RUNTIME_SA_EMAIL }}
             --allow-unauthenticated
-            --set-env-vars=FIRESTORE_PROJECT_ID=${{ secrets.GCP_PROJECT_ID }},FIRESTORE_DATABASE_NAME=${{ vars.FIRESTORE_DATABASE_NAME != '' && vars.FIRESTORE_DATABASE_NAME || '(default)' }}
+            --set-env-vars=${{ steps.runenv.outputs.env_vars }}
 
       - name: Verify public access
         run: |

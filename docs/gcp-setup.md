@@ -164,7 +164,7 @@ curl -s "${URL}/ping"   # → pong
 > endpoints still require a valid JWT (`Authorization: Bearer ...`) — only
 > `/ping`, the OpenAPI spec, and register/login/verify are anonymous.
 
-## 6. GitHub repo secrets
+## 6. GitHub repo secrets and variables
 
 Add these under **Settings → Secrets and actions → Actions → New repository secret**:
 
@@ -174,6 +174,23 @@ Add these under **Settings → Secrets and actions → Actions → New repositor
 | `GCP_WIF_PROVIDER` | `projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool/providers/github-provider` |
 | `GCP_DEPLOYER_SA_EMAIL` | `${DEPLOYER_SA}@${PROJECT_ID}.iam.gserviceaccount.com` — the SA GitHub Actions impersonates (needs `roles/run.admin`, `roles/artifactregistry.writer`, `roles/iam.serviceAccountUser`) |
 | `CLOUD_RUN_RUNTIME_SA_EMAIL` | `${RUNTIME_SA}@${PROJECT_ID}.iam.gserviceaccount.com` |
+| `JWT_SECRET` | Optional. Rotating JWT signing secret, ≥ 32 chars (`openssl rand -hex 32`). If set, every deploy applies it; if unset, the value already configured on the Cloud Run service is kept. The deploy fails if a set secret is shorter than 32 chars. |
+| `RESEND_API_KEY` | Optional. Resend API key for verification email. If unset, the value already configured on the service is kept. |
+
+Add these under **Settings → Secrets and actions → Actions → Variables → New repository variable** (non-sensitive values):
+
+| Variable | Value |
+|---|---|
+| `FIRESTORE_DATABASE_NAME` | Optional. Firestore database ID; defaults to `(default)` when unset. |
+| `APP_BASE_URL` | Optional. Public origin for verification links, e.g. `https://echo-xxxx.a.run.app`. If unset, the value already configured on the service is kept. |
+| `RESEND_FROM_EMAIL` | Optional. Verified sender address for verification email. If unset, the value already configured on the service is kept. |
+
+> How the deploy composes env vars: `FIRESTORE_PROJECT_ID` and
+> `FIRESTORE_DATABASE_NAME` are always applied (the latter defaulting to
+> `(default)`); each other variable/secret is applied only when configured, and
+> omitted keys keep whatever value the Cloud Run service already has. This
+> means you can bootstrap the config with the manual `gcloud run deploy` in
+> step 5 and later manage each value either in GitHub or out-of-band.
 
 ## 7. GitHub environment (optional, recommended)
 
