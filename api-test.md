@@ -102,13 +102,13 @@ curl -s -w "\nHTTP %{http_code}\n" -X POST http://localhost:1323/v1/register \
 | Field              | Required | Notes                                                                                  |
 |--------------------|----------|----------------------------------------------------------------------------------------|
 | `name`             | yes      | Trimmed; must not be empty.                                                            |
-| `organization_name`| yes      | Trimmed; must not be empty.                                                            |
+| `organization_name`| yes*     | Trimmed; must not be empty. Required only when `invite_token` is empty — with a token the organization comes from the token. |
 | `role`             | no       | Omitted/ignored on input — the server assigns it from `invite_token` (see below).      |
 | `manager_id`       | no       | Employee ID of the user's manager, or `null`.                                          |
 | `title`            | no       | Job title. Defaults to `""`.                                                           |
 | `email`            | yes      | Stored lowercased; uniqueness is global across organizations.                          |
 | `password`         | yes      | Plaintext; max 64 characters.                                                          |
-| `invite_token`     | no       | If empty, the employee is created with `role: "org_admin"` (the first admin). If a valid invitation token is supplied, `role: "user"`. |
+| `invite_token`     | no       | If empty, the employee is created with `role: "org_admin"` — allowed only for a brand-new organization. If a valid invitation token is supplied, `role: "user"`. |
 
 Expected response: `HTTP 201` with the created employee JSON. The `password`
 field is omitted. A fresh account has `is_mail_verified: false` and
@@ -130,6 +130,7 @@ the address.
 | 400    | `"invalid request body"`           | Malformed/non-JSON body.                                    |
 | 400    | `"<validation message>"`           | Missing/invalid fields (e.g. `"name is required"`, `"organization_name is required"`, `"password must be at most 64 characters"`). |
 | 409    | `"email already taken"`            | An employee with that email already exists.                 |
+| 409    | `"organization already exists"`    | No `invite_token` supplied, but the organization already has members. |
 | 500    | `"failed to register employee"`    | Unexpected server error.                                    |
 
 ---
@@ -272,21 +273,20 @@ the frontend should filter the caller out when populating a reviewee picker
 ## Create Invitation
 
 `POST /v1/invitation` — issues a signed invitation token that lets the bearer
-register as a member of the named organization. Requires a valid `Bearer` JWT
-and the caller must have `role: "org_admin"`; any other role returns `403`.
+register as a member of the inviter's organization. Requires a valid `Bearer`
+JWT and the caller must have `role: "org_admin"`; any other role returns `403`.
+The `organization_name` is taken from the caller's JWT (not the body), so an
+admin cannot mint join-tokens for an organization they do not administer.
 
 ```bash
 curl -s -w "\nHTTP %{http_code}\n" -X POST http://localhost:1323/v1/invitation \
   -H "Authorization: Bearer <access_token>" \
   -H "Content-Type: application/json" \
-  -d '{
-    "organization_name": "Acme"
-  }'
+  -d '{}'
 ```
 
 | Field              | Required | Notes                                                                                  |
 |--------------------|----------|----------------------------------------------------------------------------------------|
-| `organization_name`| yes      | The organization the invitee will join.                                                |
 | `expires_at`       | no       | ISO 8601 timestamp overriding the default 7-day lifetime. If omitted the token expires after 7 days. Must be in the future. |
 
 Expected response: `HTTP 201`:
@@ -302,13 +302,14 @@ Expected response: `HTTP 201`:
 }
 ```
 
-The returned `token` is then passed as `invite_token` in `POST /v1/register`
-to create the invitee's account with `role: "user"`.
+`organization_name` in the response is the inviter's organization from the
+JWT. The returned `token` is then passed as `invite_token` in
+`POST /v1/register` to create the invitee's account with `role: "user"`.
 
 | Status | `message`                                       | When                                                          |
 |--------|-------------------------------------------------|---------------------------------------------------------------|
 | 400    | `"invalid request body"`                        | Malformed/non-JSON body.                                      |
-| 400    | `"<validation message>"`                        | Missing `organization_name` or `expires_at` not in the future. |
+| 400    | `"<validation message>"`                        | `expires_at` not in the future.                               |
 | 401    | `"missing or invalid token"`                    | No/invalid `Authorization` header or bad token.               |
 | 403    | `"only org admins can create invitations"`      | Caller's `role` is not `org_admin`.                           |
 | 500    | `"failed to create invitation"`                 | Unexpected server error.                                      |

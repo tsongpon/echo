@@ -6,10 +6,13 @@ import (
 	"github.com/tsongpon/echo/internal/model"
 )
 
-// CreateInvitationRequest is the request body for POST /v1/invitation.
+// CreateInvitationRequest is the request body for POST /v1/invitation. The
+// organization the invitee will join is not settable by the client: it comes
+// from the inviter's verified JWT, so an admin cannot mint join-tokens for an
+// organization they do not administer. An organization_name field sent by an
+// old client is silently ignored during binding.
 type CreateInvitationRequest struct {
-	OrganizationName string     `json:"organization_name"`
-	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
 // InvitationResponse is the representation of an invitation returned to

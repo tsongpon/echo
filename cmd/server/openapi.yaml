@@ -110,7 +110,11 @@ paths:
             rejected with `400 "invalid or expired invitation token"`.
           * Without a token: the client-supplied `organization_name` is
             required and honored, and the role is `"org_admin"` (the first
-            admin).
+            admin). This is only allowed for an organization that does not
+            exist yet: registering without a token into an organization that
+            already has members returns `409 "organization already exists"`.
+            Joining an existing organization requires an invitation token
+            issued by one of its admins.
       operationId: registerEmployee
       security: []
       requestBody:
@@ -140,7 +144,9 @@ paths:
         "400":
           $ref: "#/components/responses/ValidationError"
         "409":
-          description: An employee with that email already exists.
+          description: An employee with that email already exists, or the
+            organization already has members and no invitation token was
+            supplied.
           content:
             application/json:
               schema:
@@ -148,6 +154,8 @@ paths:
               examples:
                 emailTaken:
                   value: { message: "email already taken" }
+                organizationTaken:
+                  value: { message: "organization already exists" }
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -314,8 +322,10 @@ paths:
       summary: Create an invitation token
       description: |
         Issues a signed invitation token that lets the bearer register as a
-        member of the named organization. The caller must have
-        `role: "org_admin"`; any other role returns `403`. The returned
+        member of the inviter's organization. The caller must have
+        `role: "org_admin"`; any other role returns `403`. The organization is
+        taken from the caller's JWT (not the body), so an admin cannot mint
+        join-tokens for an organization they do not administer. The returned
         `token` is then passed as `invite_token` in `POST /v1/register` to
         create the invitee's account with `role: "user"`.
       operationId: createInvitation
@@ -328,9 +338,11 @@ paths:
             schema:
               $ref: "#/components/schemas/CreateInvitationRequest"
             examples:
-              acme:
+              defaultExpiry:
+                value: {}
+              customExpiry:
                 value:
-                  organization_name: Acme
+                  expires_at: "2026-09-16T00:00:00Z"
       responses:
         "201":
           description: The signed invitation token and its metadata.
@@ -1361,7 +1373,11 @@ components:
           description: Trimmed; must not be empty.
         organization_name:
           type: string
-          description: Required when `invite_token` is empty (first admin); ignored otherwise.
+          description: |
+            Required when `invite_token` is empty; ignored otherwise. Without
+            a token it names a brand-new organization the caller bootstraps
+            as its first admin — registering into an organization that
+            already has members is rejected with 409.
         role:
           $ref: "#/components/schemas/Role"
           description: Omitted/ignored on input — the server assigns it from `invite_token`.
@@ -1442,11 +1458,12 @@ components:
 
     CreateInvitationRequest:
       type: object
-      description: Request body for `POST /v1/invitation`.
+      description: |
+        Request body for `POST /v1/invitation`. The organization the invitee
+        will join is taken from the inviter's JWT and cannot be set by the
+        client, so an admin cannot mint join-tokens for an organization they
+        do not administer.
       properties:
-        organization_name:
-          type: string
-          description: The organization the invitee will join.
         expires_at:
           type: string
           format: date-time
@@ -1454,13 +1471,16 @@ components:
           description: |
             ISO 8601 timestamp overriding the default 7-day lifetime. If
             omitted the token expires after 7 days. Must be in the future.
-      required: [organization_name]
+      required: []
       example:
-        organization_name: Acme
+        expires_at: "2026-09-16T00:00:00Z"
 
     InvitationResponse:
       type: object
-      description: The signed invitation token and its metadata.
+      description: |
+        The signed invitation token and its metadata. The
+        `organization_name` is the inviter's organization (from the JWT), not
+        a client-supplied value.
       properties:
         token:
           type: string

@@ -373,6 +373,35 @@ func (r *EmployeeFirestoreRepository) ListByManager(ctx context.Context, manager
 	return employees, nextCursorID, nil
 }
 
+// HasOrganization reports whether at least one employee belongs to the named
+// organization. It is a Limit(1) existence query on the single
+// organization_name field, so it needs no composite index. An empty name
+// simply reports false. A transient Firestore error is returned to the caller
+// (and logged) rather than silently treated as "does not exist", because a
+// false negative would let a caller bootstrap an organization that already
+// has members.
+func (r *EmployeeFirestoreRepository) HasOrganization(ctx context.Context, organizationName string) (bool, error) {
+	if strings.TrimSpace(organizationName) == "" {
+		return false, nil
+	}
+
+	iter := r.client.Collection(EmployeeCollection).
+		Where("organization_name", "==", organizationName).
+		Limit(1).
+		Documents(ctx)
+	defer iter.Stop()
+
+	_, err := iter.Next()
+	if errors.Is(err, iterator.Done) {
+		return false, nil
+	}
+	if err != nil {
+		r.logError("firestore: query organization existence failed", err, "organization_name", organizationName)
+		return false, fmt.Errorf("firestore: query organization existence: %w", err)
+	}
+	return true, nil
+}
+
 // Update overwrites the mutable fields of the stored employee and returns the
 // updated record. ID and CreatedAt are preserved from the stored document;
 // UpdatedAt is refreshed.

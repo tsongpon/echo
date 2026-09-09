@@ -34,6 +34,7 @@ type EmployeeRepository interface {
 	Update(ctx context.Context, employee *model.Employee) (*model.Employee, error)
 	ListByOrganization(ctx context.Context, organizationName string, limit int, cursorID string) ([]*model.Employee, string, error)
 	ListByManager(ctx context.Context, managerID string, limit int, cursorID string) ([]*model.Employee, string, error)
+	HasOrganization(ctx context.Context, organizationName string) (bool, error)
 }
 
 // EmployeeService is the application layer that orchestrates employee
@@ -68,6 +69,11 @@ const maxPasswordLen = 64
 // email-verification token via the mailer: a delivery failure is logged but
 // does not fail the registration, since the account is already usable and a
 // resend endpoint can re-issue later.
+//
+// Organization membership is authorization-gated (see the invitation-token
+// branch below): without a token the caller must be creating a brand-new
+// organization, and registering into an existing one returns
+// apperror.ErrOrganizationTaken.
 func (s *EmployeeService) Register(ctx context.Context, inviteToken string, employee *model.Employee) (*model.Employee, error) {
 	if employee == nil {
 		return nil, apperror.ErrInvalidEmployee("employee must not be nil")
@@ -95,7 +101,16 @@ func (s *EmployeeService) Register(ctx context.Context, inviteToken string, empl
 	//
 	//   - Without a token: the caller is bootstrapping a new organization, so
 	//     the client-supplied organization_name is required and honored, and
-	//     the role is "org_admin" (the first admin).
+	//     the role is "org_admin" (the first admin). Bootstrapping is only
+	//     allowed for an organization that does not exist yet: registering
+	//     without a token into an organization that already has members
+	//     returns ErrOrganizationTaken, so a stranger cannot grant themselves
+	//     org_admin in someone else's organization. Joining an existing
+	//     organization requires an invitation token issued by one of its
+	//     admins. The check is a pre-create existence query, not a uniqueness
+	//     ledger, so two concurrent bootstraps of the same brand-new
+	//     organization could in principle both succeed; the window is
+	//     milliseconds and each still needs a globally unique email.
 	if strings.TrimSpace(inviteToken) != "" {
 		claims, err := s.invitationSigner.Verify(inviteToken)
 		if err != nil {
@@ -106,6 +121,17 @@ func (s *EmployeeService) Register(ctx context.Context, inviteToken string, empl
 	} else {
 		if strings.TrimSpace(employee.OrganizationName) == "" {
 			return nil, apperror.ErrInvalidEmployee("organization_name is required")
+		}
+		exists, err := s.repo.HasOrganization(ctx, employee.OrganizationName)
+		if err != nil {
+			s.logger.Error("register aborted: organization existence check failed",
+				"error", err, "organization_name", employee.OrganizationName)
+			return nil, err
+		}
+		if exists {
+			s.logger.Warn("register rejected: organization already exists",
+				"email", employee.Email, "organization_name", employee.OrganizationName)
+			return nil, apperror.ErrOrganizationTaken
 		}
 		employee.Role = model.RoleOrgAdmin
 	}

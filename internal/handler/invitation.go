@@ -3,6 +3,7 @@ package handler
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/labstack/echo/v5"
@@ -28,9 +29,13 @@ func NewInvitationHandler(invitationService InvitationService) *InvitationHandle
 }
 
 // CreateInvitation handles POST /v1/invitation: issues a signed invitation
-// token that lets the bearer register as a member of the named organization.
-// The inviter is the authenticated employee (taken from the JWT subject), so
-// the route must be mounted behind the Auth middleware.
+// token that lets the bearer register as a member of the inviter's
+// organization. The inviter is the authenticated employee (taken from the JWT
+// subject), so the route must be mounted behind the Auth middleware.
+//
+// The organization the invitee will join is taken from the verified JWT
+// claims, never from the request body: an org_admin must not be able to mint
+// join-tokens for an organization they do not administer (the C4 finding).
 func (h *InvitationHandler) CreateInvitation(c *echo.Context) error {
 	claims := ClaimsFromContext(c)
 	if claims == nil {
@@ -42,13 +47,18 @@ func (h *InvitationHandler) CreateInvitation(c *echo.Context) error {
 	if claims.Role != model.RoleOrgAdmin {
 		return echo.NewHTTPError(http.StatusForbidden, "only org admins can create invitations")
 	}
+	if strings.TrimSpace(claims.OrganizationName) == "" {
+		// A signed token should always carry an organization; an empty one
+		// means the token predates the claim or was misissued.
+		return echo.NewHTTPError(http.StatusForbidden, "inviter token carries no organization")
+	}
 
 	var req dto.CreateInvitationRequest
 	if err := c.Bind(&req); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
 
-	token, err := h.invitationService.CreateInvitationToken(claims.Subject, req.OrganizationName, req.ExpiresAt)
+	token, err := h.invitationService.CreateInvitationToken(claims.Subject, claims.OrganizationName, req.ExpiresAt)
 	if err != nil {
 		var invalid apperror.ErrInvalidEmployee
 		if errors.As(err, &invalid) {

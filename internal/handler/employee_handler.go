@@ -62,6 +62,9 @@ func (h *EmployeeHandler) Register(c *echo.Context) error {
 		if errors.Is(err, apperror.ErrEmailTaken) {
 			return echo.NewHTTPError(http.StatusConflict, "email already taken")
 		}
+		if errors.Is(err, apperror.ErrOrganizationTaken) {
+			return echo.NewHTTPError(http.StatusConflict, "organization already exists")
+		}
 		if errors.Is(err, apperror.ErrInvalidInvitationToken) {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}

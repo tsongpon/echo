@@ -175,6 +175,17 @@ func (f *fakeRepo) ListByManager(_ context.Context, managerID string, limit int,
 	return page, nextCursor, nil
 }
 
+// HasOrganization mirrors service.EmployeeRepository.HasOrganization: it
+// reports whether any stored employee belongs to the named organization.
+func (f *fakeRepo) HasOrganization(_ context.Context, organizationName string) (bool, error) {
+	for _, e := range f.byID {
+		if e.OrganizationName == organizationName {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // noopMailer is a service.Mailer stand-in that records the last token it was
 // asked to "send" without doing any real delivery.
 type noopMailer struct {
@@ -201,6 +212,32 @@ func newTestService() (*EmployeeService, *noopMailer) {
 	// Discard log output so service tests stay quiet.
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	return NewEmployeeService(&fakeRepo{}, m, signer, invitationSigner, logger), m
+}
+
+// newTestServiceWithRepo builds an EmployeeService over a caller-supplied
+// repository, for tests that need a fake with special behavior.
+func newTestServiceWithRepo(repo EmployeeRepository) *EmployeeService {
+	signer, err := auth.NewEmailVerificationTokenSigner("test-secret", 0)
+	if err != nil {
+		panic(err)
+	}
+	invitationSigner, err := auth.NewInvitationTokenSigner("test-secret", 0)
+	if err != nil {
+		panic(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return NewEmployeeService(repo, &noopMailer{}, signer, invitationSigner, logger)
+}
+
+// hasOrgErrRepo wraps fakeRepo and fails HasOrganization with a persistent
+// error, to assert that an existence-check failure aborts registration rather
+// than being treated as "organization does not exist".
+type hasOrgErrRepo struct {
+	fakeRepo
+}
+
+func (r *hasOrgErrRepo) HasOrganization(_ context.Context, _ string) (bool, error) {
+	return false, errors.New("existence check failed")
 }
 
 func TestRegister_HashesPassword(t *testing.T) {
@@ -316,16 +353,89 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 		t.Fatalf("expected apperror.ErrEmailTaken for case variant, got %v", err)
 	}
 
-	// A genuinely new email still succeeds.
+	// A genuinely new email still succeeds. The organization must also be
+	// new: bootstrapping without a token into an existing organization is
+	// rejected by the C3 fix (see TestRegister_ExistingOrganization), and
+	// this test is about email uniqueness, not org membership.
 	fresh := &model.Employee{
 		Name:           "Bob",
-		OrganizationName: "org-1",
+		OrganizationName: "org-fresh",
 		Email:          "bob@example.com",
 		Password:       "supersecret",
 	}
 	if _, err := svc.Register(context.Background(), "", fresh); err != nil {
 		t.Fatalf("fresh email Register: unexpected error: %v", err)
 	}
+}
+
+func TestRegister_ExistingOrganization(t *testing.T) {
+	// Bootstrap the first admin of "PentestOrg", as the C3 PoC did before
+	// the fix.
+	bootstrap := func(t *testing.T, svc *EmployeeService, name, email, org string) error {
+		t.Helper()
+		_, err := svc.Register(context.Background(), "", &model.Employee{
+			Name:             name,
+			OrganizationName: org,
+			Email:            email,
+			Password:         "supersecret",
+		})
+		return err
+	}
+
+	t.Run("bootstrap into existing organization is rejected", func(t *testing.T) {
+		svc, mailer := newTestService()
+		if err := bootstrap(t, svc, "Admin", "admin@pentest.example.com", "PentestOrg"); err != nil {
+			t.Fatalf("first bootstrap: unexpected error: %v", err)
+		}
+
+		// The C3 PoC: register a second user with a fresh email into the
+		// existing organization, without an invitation token. This used to
+		// grant role org_admin immediately; it must now be rejected with
+		// ErrOrganizationTaken.
+		err := bootstrap(t, svc, "Attacker", "pentest3@example.com", "PentestOrg")
+		if !errors.Is(err, apperror.ErrOrganizationTaken) {
+			t.Fatalf("expected ErrOrganizationTaken, got %v", err)
+		}
+
+		// No new member may have been created for the attacker email. The
+		// mailer's last delivery must still be the first admin's, i.e. the
+		// attacker's registration never reached Create.
+		if mailer.lastTo != "admin@pentest.example.com" {
+			t.Fatalf("attacker registration reached employee creation; last mail to %q", mailer.lastTo)
+		}
+	})
+
+	t.Run("bootstrap into new organization succeeds", func(t *testing.T) {
+		svc, _ := newTestService()
+		created, err := svc.Register(context.Background(), "", &model.Employee{
+			Name:             "Alice",
+			OrganizationName: "FreshOrg",
+			Email:            "alice@fresh.example.com",
+			Password:         "supersecret",
+		})
+		if err != nil {
+			t.Fatalf("Register: unexpected error: %v", err)
+		}
+		if created.Role != model.RoleOrgAdmin {
+			t.Fatalf("got role %q, want org_admin for the first member", created.Role)
+		}
+	})
+
+	t.Run("existence check failure aborts registration", func(t *testing.T) {
+		// A repository failure must surface as an error, not as "org does
+		// not exist" (a false negative would reopen the vulnerability).
+		repo := &hasOrgErrRepo{}
+		svc := newTestServiceWithRepo(repo)
+		_, err := svc.Register(context.Background(), "", &model.Employee{
+			Name:             "Alice",
+			OrganizationName: "org-1",
+			Email:            "alice@example.com",
+			Password:         "supersecret",
+		})
+		if err == nil || !strings.Contains(err.Error(), "existence check failed") {
+			t.Fatalf("expected repository error to surface on first register, got %v", err)
+		}
+	})
 }
 
 func TestRegister_WithInvitationToken(t *testing.T) {
@@ -807,6 +917,9 @@ func (e *erroringRepo) ListByOrganization(_ context.Context, _ string, _ int, _ 
 }
 func (e *erroringRepo) ListByManager(_ context.Context, _ string, _ int, _ string) ([]*model.Employee, string, error) {
 	return nil, "", e.err
+}
+func (e *erroringRepo) HasOrganization(_ context.Context, _ string) (bool, error) {
+	return false, e.err
 }
 
 // testSigner builds an EmailVerificationTokenSigner for service tests.

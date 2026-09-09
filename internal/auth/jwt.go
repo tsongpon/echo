@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"crypto/hkdf"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"time"
@@ -31,22 +33,28 @@ var ErrInvalidVerificationToken = errors.New("invalid verification token")
 var ErrInvalidInvitationToken = errors.New("invalid invitation token")
 
 // TokenSigner issues signed JWTs (HS256) for authenticated employees. The
-// secret is held in memory and never serialized.
+// signing key is an HKDF-derived key (see deriveKey) held in memory and never
+// serialized; in particular it is not the raw configured base secret.
 type TokenSigner struct {
 	secret []byte
 	ttl    time.Duration
 }
 
 // NewTokenSigner creates a TokenSigner. ttl is the access-token lifetime; if
-// zero, DefaultTTL is used.
+// zero, DefaultTTL is used. The signer signs with an HKDF-derived key (see
+// deriveKey), not the raw base secret.
 func NewTokenSigner(secret string, ttl time.Duration) (*TokenSigner, error) {
 	if secret == "" {
 		return nil, ErrInvalidSecret
 	}
+	key, err := deriveKey(secret, purposeAccess)
+	if err != nil {
+		return nil, err
+	}
 	if ttl <= 0 {
 		ttl = DefaultTTL
 	}
-	return &TokenSigner{secret: []byte(secret), ttl: ttl}, nil
+	return &TokenSigner{secret: key, ttl: ttl}, nil
 }
 
 // DefaultTTL is the token lifetime used when none is specified.
@@ -55,6 +63,10 @@ const DefaultTTL = 24 * time.Hour
 // DefaultVerificationTTL is the email-verification token lifetime used when
 // none is specified.
 const DefaultVerificationTTL = 24 * time.Hour
+
+// purposeAccess is the HKDF info string for the employee access-token signing
+// key.
+const purposeAccess = "access"
 
 // purposeEmailVerification marks a JWT as an email-verification token. The
 // claim is checked on verify so that a token of any other type (including an
@@ -65,6 +77,32 @@ const purposeEmailVerification = "email_verification"
 // is checked on verify so that a token of any other type (including an access
 // or email-verification token) is never accepted as an invitation.
 const purposeInvitation = "invitation"
+
+// derivedKeyLength is the HMAC key length, in bytes, produced by deriveKey.
+// 32 bytes is the full security level of SHA-256 and a sound HMAC key size.
+const derivedKeyLength = 32
+
+// deriveKey derives the purpose-specific HMAC signing key from a base secret
+// using HKDF-SHA-256 (RFC 5869). Each token type passes its own purpose string
+// as the HKDF info, so every signer gets a distinct, cryptographically
+// independent key even though all share the same base secret.
+//
+// This replaces the former naive concatenation ("secret + ::emailverify"),
+// which let anyone who knows the base secret compute every purpose key by
+// guessing the suffix. Under HKDF, knowing the base secret is still sufficient
+// to derive the keys (the base secret is the root of trust), but the derived
+// keys of different purposes are unrelated to one another: learning one
+// derived key reveals nothing about the others or the base secret.
+//
+// A separate salt per purpose is unnecessary: the info parameter already
+// domain-separates the outputs within HKDF's expand stage.
+func deriveKey(baseSecret, purpose string) ([]byte, error) {
+	key, err := hkdf.Key(sha256.New, []byte(baseSecret), nil, purpose, derivedKeyLength)
+	if err != nil {
+		return nil, fmt.Errorf("derive key for %q: %w", purpose, err)
+	}
+	return key, nil
+}
 
 // Claims is the JWT payload for an employee access token.
 type Claims struct {
@@ -128,10 +166,9 @@ func (s *TokenSigner) Verify(token string) (*Claims, error) {
 
 // EmailVerificationTokenSigner issues short-lived signed JWTs used to verify
 // that an employee controls the email they registered with. It is deliberately
-// separate from TokenSigner: it signs with a derived key (the base secret
-// suffixed with "::emailverify") so a verification token can never be valid as
-// an access token and vice-versa, even when both signers share the same base
-// secret.
+// separate from TokenSigner: it signs with an HKDF-derived key (see deriveKey)
+// so a verification token can never be valid as an access token and vice-versa,
+// even when both signers share the same base secret.
 type EmailVerificationTokenSigner struct {
 	secret []byte
 	ttl    time.Duration
@@ -139,14 +176,20 @@ type EmailVerificationTokenSigner struct {
 
 // NewEmailVerificationTokenSigner creates an EmailVerificationTokenSigner. ttl
 // is the verification-token lifetime; if zero, DefaultVerificationTTL is used.
+// The signing key is derived from the base secret via HKDF with the
+// email-verification purpose as its info string.
 func NewEmailVerificationTokenSigner(secret string, ttl time.Duration) (*EmailVerificationTokenSigner, error) {
 	if secret == "" {
 		return nil, ErrInvalidSecret
 	}
+	key, err := deriveKey(secret, purposeEmailVerification)
+	if err != nil {
+		return nil, err
+	}
 	if ttl <= 0 {
 		ttl = DefaultVerificationTTL
 	}
-	return &EmailVerificationTokenSigner{secret: []byte(secret + "::emailverify"), ttl: ttl}, nil
+	return &EmailVerificationTokenSigner{secret: key, ttl: ttl}, nil
 }
 
 // VerificationClaims is the JWT payload for an email-verification token. The
@@ -210,25 +253,31 @@ const DefaultInvitationTTL = 24 * 7 * time.Hour
 
 // InvitationTokenSigner issues signed JWTs used to invite a user to join an
 // organization. It is deliberately separate from TokenSigner and
-// EmailVerificationTokenSigner: it signs with a derived key (the base secret
-// suffixed with "::invitation") so an invitation token can never be valid as an
-// access or email-verification token and vice-versa, even when all signers
-// share the same base secret.
+// EmailVerificationTokenSigner: it signs with an HKDF-derived key (see
+// deriveKey) so an invitation token can never be valid as an access or
+// email-verification token and vice-versa, even when all signers share the
+// same base secret.
 type InvitationTokenSigner struct {
 	secret []byte
 	ttl    time.Duration
 }
 
 // NewInvitationTokenSigner creates an InvitationTokenSigner. ttl is the
-// invitation-token lifetime; if zero, DefaultInvitationTTL is used.
+// invitation-token lifetime; if zero, DefaultInvitationTTL is used. The signing
+// key is derived from the base secret via HKDF with the invitation purpose as
+// its info string.
 func NewInvitationTokenSigner(secret string, ttl time.Duration) (*InvitationTokenSigner, error) {
 	if secret == "" {
 		return nil, ErrInvalidSecret
 	}
+	key, err := deriveKey(secret, purposeInvitation)
+	if err != nil {
+		return nil, err
+	}
 	if ttl <= 0 {
 		ttl = DefaultInvitationTTL
 	}
-	return &InvitationTokenSigner{secret: []byte(secret + "::invitation"), ttl: ttl}, nil
+	return &InvitationTokenSigner{secret: key, ttl: ttl}, nil
 }
 
 // InvitationClaims is the JWT payload for an invitation token. The subject is

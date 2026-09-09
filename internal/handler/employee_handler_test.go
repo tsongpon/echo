@@ -472,6 +472,13 @@ func TestRegister_Handler(t *testing.T) {
 			wantBodyIn:  "email already taken",
 		},
 		{
+			name:        "existing organization",
+			body:        `{"name":"Alice","organization_name":"org-1","email":"alice@example.com","password":"supersecret"}`,
+			registerErr: apperror.ErrOrganizationTaken,
+			wantCode:    http.StatusConflict,
+			wantBodyIn:  "organization already exists",
+		},
+		{
 			name:        "validation error",
 			body:        `{"name":"","organization_name":"org-1","email":"a@example.com","password":"supersecret"}`,
 			registerErr: apperror.ErrInvalidEmployee("name is required"),

@@ -39,6 +39,12 @@ var ErrInvalidInvitationToken = errors.New("invalid or expired invitation token"
 // spans organizations.
 var ErrEmailTaken = errors.New("email already taken")
 
+// ErrOrganizationTaken is returned by Register when a caller attempts to
+// bootstrap (register without an invitation token into) an organization that
+// already has members. The first admin of an organization registers freely;
+// everyone after must present a valid invitation token.
+var ErrOrganizationTaken = errors.New("organization already exists")
+
 // ErrFeedbackPeriodNotFound is returned when no feedback period matches a
 // lookup. Used by the feedback service when validating that a feedback entry's
 // period_id refers to an existing period.

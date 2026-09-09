@@ -57,6 +57,12 @@ const swaggerUIPage = `<!DOCTYPE html>
 </body>
 </html>`
 
+// minJWTSecretLen is the minimum accepted length of a JWT_SECRET configured
+// via the environment. 32 characters matches the 32-byte security level of the
+// SHA-256-based signing and key-derivation scheme ("openssl rand -hex 32"
+// produces 64 characters). Shorter configured values are rejected at startup.
+const minJWTSecretLen = 32
+
 func main() {
 	if err := godotenv.Load(); err != nil {
 		slog.Info("no .env file found; relying on environment variables")
@@ -70,6 +76,14 @@ func main() {
 	e.Use(middleware.Recover())
 	e.Use(middleware.CORSWithConfig(buildCORSConfig()))
 
+	// The JWT secret is the root of trust for all issued tokens (access,
+	// email-verification, and invitation keys are HKDF-derived from it; see
+	// auth.deriveKey). It must be long enough to resist brute force of the
+	// HMAC-SHA256 signature, so a configured-but-weak value is fatal rather
+	// than a warning: the operator asked for a specific secret and silently
+	// substituting a different one (random or not) would be surprising. When
+	// unset, a fresh random secret is generated for this process only, which
+	// is acceptable for local development but not for any real deployment.
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
 		rb := make([]byte, 32)
@@ -78,6 +92,8 @@ func main() {
 		}
 		secret = hex.EncodeToString(rb)
 		slog.Warn("JWT_SECRET not set; using a random secret that will not persist across restarts")
+	} else if len(secret) < minJWTSecretLen {
+		fatal("JWT_SECRET is too weak", "min_length", minJWTSecretLen, "actual_length", len(secret))
 	}
 
 	// Listen port. Defaults to 1323.

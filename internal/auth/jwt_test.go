@@ -32,13 +32,15 @@ func TestTokenSigner_SignAndParse(t *testing.T) {
 		t.Fatal("Sign returned empty token")
 	}
 
-	// Parse it back with the same secret and verify the claims.
+	// Parse it back with the same signer (and therefore the same derived
+	// key) and verify the claims. Parsing by hand rather than calling
+	// Verify only to assert the claims contents.
 	claims := &Claims{}
 	token, err := jwt.ParseWithClaims(signed, claims, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, errors.New("unexpected signing method")
 		}
-		return []byte("test-secret"), nil
+		return deriveKey("test-secret", purposeAccess)
 	})
 	if err != nil {
 		t.Fatalf("ParseWithClaims: %v", err)
@@ -274,4 +276,121 @@ func TestEmailVerificationTokenSigner(t *testing.T) {
 			t.Fatalf("expected ErrInvalidToken, got %v", err)
 		}
 	})
+}
+
+// TestSigners_RejectForgedKeys covers the C2 finding: every signer must sign
+// with an HKDF-derived key, so a forged token signed with the raw base secret
+// or with the legacy concatenation-style keys ("secret::emailverify",
+// "secret::invitation") must be rejected by every verify path. Before the fix,
+// anyone who knew the base secret could compute the verification and
+// invitation keys by guessing the suffix.
+func TestSigners_RejectForgedKeys(t *testing.T) {
+	const baseSecret = "test-secret"
+
+	emp := &model.Employee{ID: "emp-1", Email: "alice@example.com"}
+
+	accessSigner, err := NewTokenSigner(baseSecret, time.Hour)
+	if err != nil {
+		t.Fatalf("NewTokenSigner: %v", err)
+	}
+	verifySigner, err := NewEmailVerificationTokenSigner(baseSecret, time.Hour)
+	if err != nil {
+		t.Fatalf("NewEmailVerificationTokenSigner: %v", err)
+	}
+	invSigner, err := NewInvitationTokenSigner(baseSecret, time.Hour)
+	if err != nil {
+		t.Fatalf("NewInvitationTokenSigner: %v", err)
+	}
+
+	// Forged keys: the raw base secret and the legacy concatenation forms.
+	forgedKeys := map[string][]byte{
+		"raw base secret":        []byte(baseSecret),
+		"legacy emailverify key": []byte(baseSecret + "::emailverify"),
+		"legacy invitation key":  []byte(baseSecret + "::invitation"),
+	}
+
+	for name, key := range forgedKeys {
+		t.Run(name, func(t *testing.T) {
+			// Forge an access token.
+			accessClaims := Claims{
+				Email:            emp.Email,
+				OrganizationName: "org-1",
+				Role:             model.RoleOrgAdmin,
+				RegisteredClaims: jwt.RegisteredClaims{
+					Subject:   emp.ID,
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+				},
+			}
+			forgedAccess, err := jwt.NewWithClaims(jwt.SigningMethodHS256, accessClaims).SignedString(key)
+			if err != nil {
+				t.Fatalf("sign forged access token: %v", err)
+			}
+			if _, err := accessSigner.Verify(forgedAccess); !errors.Is(err, ErrInvalidToken) {
+				t.Fatalf("access signer accepted forged key: %v", err)
+			}
+
+			// Forge an email-verification token.
+			verifyClaims := VerificationClaims{
+				Email:   emp.Email,
+				Purpose: purposeEmailVerification,
+				RegisteredClaims: jwt.RegisteredClaims{
+					Subject:   emp.ID,
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+				},
+			}
+			forgedVerify, err := jwt.NewWithClaims(jwt.SigningMethodHS256, verifyClaims).SignedString(key)
+			if err != nil {
+				t.Fatalf("sign forged verification token: %v", err)
+			}
+			if _, err := verifySigner.Verify(forgedVerify); !errors.Is(err, ErrInvalidVerificationToken) {
+				t.Fatalf("verification signer accepted forged key: %v", err)
+			}
+
+			// Forge an invitation token.
+			invClaims := InvitationClaims{
+				OrganizationName: "org-1",
+				Purpose:          purposeInvitation,
+				RegisteredClaims: jwt.RegisteredClaims{
+					Subject:   emp.ID,
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+				},
+			}
+			forgedInv, err := jwt.NewWithClaims(jwt.SigningMethodHS256, invClaims).SignedString(key)
+			if err != nil {
+				t.Fatalf("sign forged invitation token: %v", err)
+			}
+			if _, err := invSigner.Verify(forgedInv); !errors.Is(err, ErrInvalidInvitationToken) {
+				t.Fatalf("invitation signer accepted forged key: %v", err)
+			}
+		})
+	}
+}
+
+// TestSigners_DerivedKeysAreDistinct asserts that the three signers derived
+// from one base secret hold three different keys (HKDF domain separation). It
+// guards against a regression that silently reverts to a shared key.
+func TestSigners_DerivedKeysAreDistinct(t *testing.T) {
+	const baseSecret = "test-secret"
+
+	accessSigner, err := NewTokenSigner(baseSecret, time.Hour)
+	if err != nil {
+		t.Fatalf("NewTokenSigner: %v", err)
+	}
+	verifySigner, err := NewEmailVerificationTokenSigner(baseSecret, time.Hour)
+	if err != nil {
+		t.Fatalf("NewEmailVerificationTokenSigner: %v", err)
+	}
+	invSigner, err := NewInvitationTokenSigner(baseSecret, time.Hour)
+	if err != nil {
+		t.Fatalf("NewInvitationTokenSigner: %v", err)
+	}
+
+	keys := [][]byte{accessSigner.secret, verifySigner.secret, invSigner.secret}
+	for i := 0; i < len(keys); i++ {
+		for j := i + 1; j < len(keys); j++ {
+			if string(keys[i]) == string(keys[j]) {
+				t.Fatalf("signers %d and %d share the same key", i, j)
+			}
+		}
+	}
 }
