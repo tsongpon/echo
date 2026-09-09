@@ -138,9 +138,18 @@ jobs:
           image: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.sha_short }}
           # Public access: allUsers gets roles/run.invoker on every deploy.
           # The runtime service account Cloud Run uses for Firestore access.
+          # Env vars:
+          #   FIRESTORE_PROJECT_ID   - GCP project hosting Firestore.
+          #   FIRESTORE_DATABASE_NAME - Firestore database ID within the
+          #     project. Default "(default)" when unset; needed only for a
+          #     non-default database.
+          #   JWT_SECRET et al. are managed out-of-band (gcloud / console) and
+          #     are preserved by Cloud Run on redeploy; this step only pins the
+          #     listed env vars to their current values.
           flags: >-
             --service-account=${{ secrets.CLOUD_RUN_RUNTIME_SA_EMAIL }}
             --allow-unauthenticated
+            --set-env-vars=FIRESTORE_PROJECT_ID=${{ secrets.GCP_PROJECT_ID }},FIRESTORE_DATABASE_NAME=${{ vars.FIRESTORE_DATABASE_NAME != '' && vars.FIRESTORE_DATABASE_NAME || '(default)' }}
 
       - name: Verify public access
         run: |
