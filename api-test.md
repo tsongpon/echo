@@ -28,6 +28,9 @@ are JSON; responses are JSON. The dev server listens on `http://localhost:1323`.
 | GET    | `/v1/me/reports`    | Bearer token   | List the caller's direct reportees (paginated).              |
 | PATCH  | `/v1/employees/:id/manager` | Bearer token¹ | Assign or clear an employee's manager (org admins only). |
 | GET    | `/v1/employees/:id/feedbacks` | Bearer token | List feedback received by a reportee (manager view, paginated). |
+| POST   | `/v1/feedback-requests` | Bearer token | Ask a colleague for feedback in a period.                    |
+| GET    | `/v1/me/feedback-requests` | Bearer token | List the caller's requests, received or sent (paginated).  |
+| POST   | `/v1/feedback-requests/:id/decline` | Bearer token | Decline one of the caller's received requests.         |
 
 ¹ The caller's JWT `role` claim must be `org_admin`; any other role gets `403`.
 
@@ -982,3 +985,143 @@ view blinds reviewer identities unconditionally.
 | 403    | `"only the employee's manager can view their feedback"` | The caller is not the reviewee's current manager.        |
 | 404    | `"employee not found"`                               | No employee matches the reviewee ID.                       |
 | 500    | `"failed to list feedbacks"`                         | Unexpected server error.                                   |
+
+---
+
+## Create Feedback Request
+
+`POST /v1/feedback-requests` — asks a colleague for feedback within a
+feedback period. The requester is the authenticated employee (taken from the
+JWT subject). On success the requestee is notified by email on a best-effort
+basis; a delivery failure is logged but does not fail the create.
+
+Validation:
+* `requestee_id` is required, must refer to an existing employee in the
+  requester's organization, and must differ from the requester (no
+  self-requests).
+* `period_id` is required and must refer to an existing feedback period. The
+  period's date window is intentionally NOT enforced: a request may be made
+  before the period opens.
+
+At most one OPEN request may exist per (requester, requestee, period) triple;
+a duplicate returns `409`. Declining or completing the request releases the
+slot, so the requester may ask again.
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X POST http://localhost:1323/v1/feedback-requests \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"requestee_id": "<employee id>", "period_id": "<period id>"}'
+```
+
+Expected response: `HTTP 201`:
+
+```json
+{
+  "id": "0190cdef-...",
+  "requester_id": "<authenticated employee id>",
+  "requestee_id": "0190bbbb-...",
+  "period_id": "0190abcd-...",
+  "status": "open",
+  "created_at": "2026-09-10T10:00:00Z",
+  "updated_at": "2026-09-10T10:00:00Z"
+}
+```
+
+| Status | `message`                                              | When                                                       |
+|--------|-------------------------------------------------------|-------------------------------------------------------------|
+| 400    | `"<validation reason>"`                               | Missing/unknown requestee or period, self-request, cross-org. |
+| 401    | `"missing or invalid token"`                           | No/invalid `Authorization` header or bad token.             |
+| 409    | `"an open request for this colleague and period already exists"` | Duplicate open request.                          |
+| 500    | `"failed"`                                            | Unexpected server error.                                    |
+
+---
+
+## List My Feedback Requests
+
+`GET /v1/me/feedback-requests` — returns one page of the caller's feedback
+requests, ordered by `created_at` descending (newest first). The optional
+`direction` query parameter selects the side: `received` (the default) lists
+requests where the caller is the requestee; `sent` lists requests where the
+caller is the requester. Requests in every status are listed.
+
+Pagination is cursor-based and controlled by two optional query parameters
+plus `direction`:
+
+| Parameter   | Default   | Notes                                                                                  |
+|-------------|-----------|----------------------------------------------------------------------------------------|
+| `direction` | `received`| `received` for requests made to the caller; `sent` for requests made by the caller.   |
+| `limit`     | `20`      | Page size. Non-numeric or `<= 0` falls back to the default; values above `100` are capped. |
+| `cursor`    | —         | The `next_cursor` value from the previous page (a request ID). Omit on the first page. An unknown cursor returns `400`. |
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X GET "http://localhost:1323/v1/me/feedback-requests?direction=received&limit=20" \
+  -H "Authorization: Bearer <access_token>"
+```
+
+Expected response: `HTTP 200`:
+
+```json
+{
+  "requests": [
+    {
+      "id": "0190cdef-...",
+      "requester_id": "0190aaaa-...",
+      "requestee_id": "<authenticated employee id>",
+      "period_id": "0190abcd-...",
+      "status": "open",
+      "created_at": "2026-09-10T10:00:00Z",
+      "updated_at": "2026-09-10T10:00:00Z"
+    }
+  ],
+  "next_cursor": null
+}
+```
+
+A request becomes `completed` automatically when the requestee submits
+feedback for the requester in the request's period (via `POST /v1/feedbacks`
+or the draft submit endpoint).
+
+| Status | `message`                       | When                                                |
+|--------|---------------------------------|-----------------------------------------------------|
+| 400    | `"unknown cursor"`              | `cursor` does not refer to an existing request.      |
+| 401    | `"missing or invalid token"`    | No/invalid `Authorization` header or bad token.     |
+| 500    | `"failed"`                      | Unexpected server error.                            |
+
+---
+
+## Decline Feedback Request
+
+`POST /v1/feedback-requests/:id/decline` — transitions the caller's received
+request to the declined state and releases its (requester, requestee, period)
+slot, so the requester may ask again.
+
+Only the requestee may decline; anyone else — like a request that does not
+exist or is no longer open — gets `404` rather than `403`, so a request's
+existence never leaks to other employees.
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n" -X POST "http://localhost:1323/v1/feedback-requests/<request id>/decline" \
+  -H "Authorization: Bearer <access_token>"
+```
+
+Expected response: `HTTP 200`:
+
+```json
+{
+  "id": "0190cdef-...",
+  "requester_id": "0190aaaa-...",
+  "requestee_id": "<authenticated employee id>",
+  "period_id": "0190abcd-...",
+  "status": "declined",
+  "created_at": "2026-09-10T10:00:00Z",
+  "updated_at": "2026-09-10T11:00:00Z"
+}
+```
+
+| Status | `message`                     | When                                                  |
+|--------|-------------------------------|-------------------------------------------------------|
+| 400    | `"<validation reason>"`      | Missing request ID.                                   |
+| 401    | `"missing or invalid token"` | No/invalid `Authorization` header or bad token.       |
+| 404    | `"feedback request not found"`| No open request with this ID belongs to the caller. |
+| 500    | `"failed"`                    | Unexpected server error.                              |

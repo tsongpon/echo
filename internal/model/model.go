@@ -98,6 +98,38 @@ type FeedbackPeriod struct {
 	UpdatedAt        time.Time
 }
 
+// FeedbackRequestStatus is the lifecycle state of a feedback request. A request
+// is created as open; it becomes completed automatically when the requestee
+// submits feedback for the requester in the request's period, or declined
+// explicitly by the requestee.
+type FeedbackRequestStatus string
+
+const (
+	// FeedbackRequestStatusOpen marks a request that is still awaiting
+	// feedback. Only one open request may exist per (requester, requestee,
+	// period) triple; declining or completing it releases the slot so a new
+	// request may be made.
+	FeedbackRequestStatusOpen FeedbackRequestStatus = "open"
+	// FeedbackRequestStatusCompleted marks a request that was fulfilled: the
+	// requestee submitted feedback for the requester in the request's period.
+	FeedbackRequestStatusCompleted FeedbackRequestStatus = "completed"
+	// FeedbackRequestStatusDeclined marks a request the requestee explicitly
+	// declined. The requester may send a new request afterwards.
+	FeedbackRequestStatusDeclined FeedbackRequestStatus = "declined"
+)
+
+// FeedbackRequest is an ask from one employee (the requester) for another
+// (the requestee) to write feedback for them within a feedback period.
+type FeedbackRequest struct {
+	ID          string
+	RequesterID string
+	RequesteeID string
+	PeriodID    string
+	Status      FeedbackRequestStatus
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
 type Invitation struct {
 	ID               string
 	CreatedBy        string

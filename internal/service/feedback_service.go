@@ -55,6 +55,15 @@ type EmployeeLookup interface {
 	GetByID(ctx context.Context, id string) (*model.Employee, error)
 }
 
+// FeedbackRequestCloser is the consumer-defined contract for completing a
+// feedback request when its matching feedback is submitted. The feedback
+// service calls it after a successful create/submit; the concrete
+// FeedbackRequestService implements it. Keeping the contract to one method
+// means the feedback service knows nothing about request storage.
+type FeedbackRequestCloser interface {
+	CloseMatchingOpen(ctx context.Context, requesterID, requesteeID, periodID string) error
+}
+
 // FeedbackService is the application layer that orchestrates feedback
 // operations against a FeedbackRepository. It validates that a feedback entry's
 // period_id refers to an existing feedback period via the injected
@@ -64,6 +73,7 @@ type FeedbackService struct {
 	repo      FeedbackRepository
 	periods   FeedbackPeriodLookup
 	employees EmployeeLookup
+	requests  FeedbackRequestCloser
 	logger    *slog.Logger
 }
 
@@ -106,17 +116,38 @@ func validatePeriodOpen(period *model.FeedbackPeriod) error {
 }
 
 // NewFeedbackService creates a FeedbackService backed by the given feedback
-// repository, feedback-period lookup, and employee lookup. If logger is nil,
-// slog.Default() is used. periods may be nil to disable period-existence
-// validation (useful in tests that don't care about the period); in production
-// it should always be provided. employees may likewise be nil in tests, but
-// ListByRevieweeForManager fails closed when it is nil (the manager-view
-// authorization cannot be performed without it).
-func NewFeedbackService(repo FeedbackRepository, periods FeedbackPeriodLookup, employees EmployeeLookup, logger *slog.Logger) *FeedbackService {
+// repository, feedback-period lookup, employee lookup, and feedback-request
+// closer. If logger is nil, slog.Default() is used. periods may be nil to
+// disable period-existence validation (useful in tests that don't care about
+// the period); in production it should always be provided. employees may
+// likewise be nil in tests, but ListByRevieweeForManager fails closed when it
+// is nil (the manager-view authorization cannot be performed without it).
+// requests may be nil to disable request completion (tests); in production
+// it should be the FeedbackRequestService so submitted feedback completes
+// the matching open request, best-effort.
+func NewFeedbackService(repo FeedbackRepository, periods FeedbackPeriodLookup, employees EmployeeLookup, requests FeedbackRequestCloser, logger *slog.Logger) *FeedbackService {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &FeedbackService{repo: repo, periods: periods, employees: employees, logger: logger}
+	return &FeedbackService{repo: repo, periods: periods, employees: employees, requests: requests, logger: logger}
+}
+
+// closeMatchingRequests completes the open feedback request — if any — that
+// the reviewee (the person the feedback is about... reversed here: the
+// reviewer just wrote feedback about revieweeID, so any request FROM
+// revieweeID TO the reviewer in this period is fulfilled) matching the
+// just-submitted feedback. Best-effort: a failure is logged and never
+// surfaces to the submitter, because the feedback itself is already durable.
+func (s *FeedbackService) closeMatchingRequests(ctx context.Context, reviewerID, revieweeID, periodID string) {
+	if s.requests == nil {
+		return
+	}
+	// The reviewer wrote feedback about the reviewee, so the fulfilled request
+	// is: requester = revieweeID, requestee = reviewerID, in this period.
+	if err := s.requests.CloseMatchingOpen(ctx, revieweeID, reviewerID, periodID); err != nil {
+		s.logger.Error("failed to complete matching feedback request",
+			"error", err, "reviewer_id", reviewerID, "reviewee_id", revieweeID, "period_id", periodID)
+	}
 }
 
 // Create creates a new submitted feedback entry after validating the input.
@@ -231,6 +262,11 @@ func (s *FeedbackService) Create(ctx context.Context, reviewerID string, feedbac
 			"error", err, "feedback_id", feedback.ID, "reviewer_id", reviewerID, "reviewee_id", feedback.RevieweeID, "period_id", feedback.PeriodID)
 		return nil, err
 	}
+
+	// The submitted feedback may fulfill an open request from the reviewee to
+	// the reviewer in this period; complete it best-effort.
+	s.closeMatchingRequests(ctx, reviewerID, created.RevieweeID, created.PeriodID)
+
 	return created, nil
 }
 
@@ -640,6 +676,11 @@ func (s *FeedbackService) SubmitDraft(ctx context.Context, reviewerID, draftID s
 			"error", err, "reviewer_id", reviewerID, "draft_id", draftID)
 		return nil, err
 	}
+
+	// The submitted feedback may fulfill an open request from the reviewee to
+	// the reviewer in this period; complete it best-effort.
+	s.closeMatchingRequests(ctx, reviewerID, submitted.RevieweeID, submitted.PeriodID)
+
 	return submitted, nil
 }
 

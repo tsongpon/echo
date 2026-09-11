@@ -16,11 +16,15 @@ import (
 )
 
 // Mailer is the consumer-defined contract for sending transactional email. It
-// is intentionally minimal: only the operations the service actually needs.
+// is intentionally minimal: only the operations the services actually need.
 // Concrete implementations (e.g. a logging mailer for local dev, an SMTP
 // mailer for production) satisfy it implicitly.
 type Mailer interface {
 	SendVerificationEmail(ctx context.Context, to, token string) error
+	// SendFeedbackRequestEmail notifies an employee that a colleague asked
+	// them for feedback. requesterName and periodName are display strings
+	// composed by the caller; the mailer only decides subject and body.
+	SendFeedbackRequestEmail(ctx context.Context, to, requesterName, periodName string) error
 }
 
 // EmployeeRepository is the consumer-defined contract for the employee

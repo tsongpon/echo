@@ -189,13 +189,21 @@ func (f *fakeRepo) HasOrganization(_ context.Context, organizationName string) (
 // noopMailer is a service.Mailer stand-in that records the last token it was
 // asked to "send" without doing any real delivery.
 type noopMailer struct {
-	lastTo    string
-	lastToken string
+	lastTo     string
+	lastToken  string
+	lastReqTo  string
+	lastReqFor string
 }
 
 func (m *noopMailer) SendVerificationEmail(_ context.Context, to, token string) error {
 	m.lastTo = to
 	m.lastToken = token
+	return nil
+}
+
+func (m *noopMailer) SendFeedbackRequestEmail(_ context.Context, to, requesterName, _ string) error {
+	m.lastReqTo = to
+	m.lastReqFor = requesterName
 	return nil
 }
 
@@ -245,10 +253,10 @@ func TestRegister_HashesPassword(t *testing.T) {
 
 	plaintext := "supersecret"
 	emp := &model.Employee{
-		Name:           "Alice",
+		Name:             "Alice",
 		OrganizationName: "org-1",
-		Email:          "alice@example.com",
-		Password:       plaintext,
+		Email:            "alice@example.com",
+		Password:         plaintext,
 	}
 
 	created, err := svc.Register(context.Background(), "", emp)
@@ -284,10 +292,10 @@ func TestRegister_SendsVerification(t *testing.T) {
 	svc, mailer := newTestService()
 
 	created, err := svc.Register(context.Background(), "", &model.Employee{
-		Name:           "Alice",
+		Name:             "Alice",
 		OrganizationName: "org-1",
-		Email:          "alice@example.com",
-		Password:       "supersecret",
+		Email:            "alice@example.com",
+		Password:         "supersecret",
 	})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
@@ -310,10 +318,10 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 	svc, _ := newTestService()
 
 	first := &model.Employee{
-		Name:           "Alice",
+		Name:             "Alice",
 		OrganizationName: "org-1",
-		Email:          "alice@example.com",
-		Password:       "supersecret",
+		Email:            "alice@example.com",
+		Password:         "supersecret",
 	}
 	if _, err := svc.Register(context.Background(), "", first); err != nil {
 		t.Fatalf("first Register: unexpected error: %v", err)
@@ -322,10 +330,10 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 	// A second registration with the same email must be rejected. Email
 	// uniqueness is global, so an different organization does not help.
 	second := &model.Employee{
-		Name:           "Alicia",
+		Name:             "Alicia",
 		OrganizationName: "org-2",
-		Email:          "alice@example.com",
-		Password:       "anothersecret",
+		Email:            "alice@example.com",
+		Password:         "anothersecret",
 	}
 	_, err := svc.Register(context.Background(), "", second)
 	if !errors.Is(err, apperror.ErrEmailTaken) {
@@ -344,10 +352,10 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 	// Case-insensitive: an uppercased variant of the same email is still a
 	// duplicate.
 	third := &model.Employee{
-		Name:           "Aly",
+		Name:             "Aly",
 		OrganizationName: "org-3",
-		Email:          "ALICE@example.com",
-		Password:       "yetanother",
+		Email:            "ALICE@example.com",
+		Password:         "yetanother",
 	}
 	if _, err := svc.Register(context.Background(), "", third); !errors.Is(err, apperror.ErrEmailTaken) {
 		t.Fatalf("expected apperror.ErrEmailTaken for case variant, got %v", err)
@@ -358,10 +366,10 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 	// rejected by the C3 fix (see TestRegister_ExistingOrganization), and
 	// this test is about email uniqueness, not org membership.
 	fresh := &model.Employee{
-		Name:           "Bob",
+		Name:             "Bob",
 		OrganizationName: "org-fresh",
-		Email:          "bob@example.com",
-		Password:       "supersecret",
+		Email:            "bob@example.com",
+		Password:         "supersecret",
 	}
 	if _, err := svc.Register(context.Background(), "", fresh); err != nil {
 		t.Fatalf("fresh email Register: unexpected error: %v", err)
@@ -546,10 +554,10 @@ func TestLogin(t *testing.T) {
 
 	const plaintext = "supersecret"
 	created, err := svc.Register(context.Background(), "", &model.Employee{
-		Name:           "Alice",
+		Name:             "Alice",
 		OrganizationName: "org-1",
-		Email:          "alice@example.com",
-		Password:       plaintext,
+		Email:            "alice@example.com",
+		Password:         plaintext,
 	})
 	if err != nil {
 		t.Fatalf("Register: unexpected error: %v", err)
@@ -606,10 +614,10 @@ func TestLogin(t *testing.T) {
 		svc, _ := newTestService()
 		const pw = "supersecret"
 		if _, err := svc.Register(context.Background(), "", &model.Employee{
-			Name:           "Bob",
+			Name:             "Bob",
 			OrganizationName: "org-1",
-			Email:          "bob@example.com",
-			Password:       pw,
+			Email:            "bob@example.com",
+			Password:         pw,
 		}); err != nil {
 			t.Fatalf("Register: %v", err)
 		}
@@ -625,10 +633,10 @@ func TestGetByID(t *testing.T) {
 	svc, _ := newTestService()
 
 	created, err := svc.Register(context.Background(), "", &model.Employee{
-		Name:           "Alice",
+		Name:             "Alice",
 		OrganizationName: "org-1",
-		Email:          "alice@example.com",
-		Password:       "supersecret",
+		Email:            "alice@example.com",
+		Password:         "supersecret",
 	})
 	if err != nil {
 		t.Fatalf("Register: unexpected error: %v", err)
@@ -677,17 +685,17 @@ func TestRegister_ValidationErrors(t *testing.T) {
 			name: "missing name",
 			emp: &model.Employee{
 				OrganizationName: "org-1",
-				Email:          "a@example.com",
-				Password:       "pw",
+				Email:            "a@example.com",
+				Password:         "pw",
 			},
 			wantMsg: "name is required",
 		},
 		{
 			name: "missing email",
 			emp: &model.Employee{
-				Name:           "Bob",
+				Name:             "Bob",
 				OrganizationName: "org-1",
-				Password:       "pw",
+				Password:         "pw",
 			},
 			wantMsg: "email is required",
 		},
@@ -703,19 +711,19 @@ func TestRegister_ValidationErrors(t *testing.T) {
 		{
 			name: "missing password",
 			emp: &model.Employee{
-				Name:           "Bob",
+				Name:             "Bob",
 				OrganizationName: "org-1",
-				Email:          "a@example.com",
+				Email:            "a@example.com",
 			},
 			wantMsg: "password is required",
 		},
 		{
 			name: "password too long",
 			emp: &model.Employee{
-				Name:           "Bob",
+				Name:             "Bob",
 				OrganizationName: "org-1",
-				Email:          "a@example.com",
-				Password:       strings.Repeat("x", maxPasswordLen+1),
+				Email:            "a@example.com",
+				Password:         strings.Repeat("x", maxPasswordLen+1),
 			},
 			wantMsg: "password must be at most 64 characters",
 		},
@@ -936,10 +944,10 @@ func TestSendVerification(t *testing.T) {
 	svc, mailer := newTestService()
 
 	created, err := svc.Register(context.Background(), "", &model.Employee{
-		Name:           "Alice",
+		Name:             "Alice",
 		OrganizationName: "org-1",
-		Email:          "alice@example.com",
-		Password:       "supersecret",
+		Email:            "alice@example.com",
+		Password:         "supersecret",
 	})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
@@ -961,10 +969,10 @@ func TestVerifyEmail(t *testing.T) {
 	setup := func(t *testing.T) (*EmployeeService, *model.Employee, string) {
 		svc, _ := newTestService()
 		created, err := svc.Register(context.Background(), "", &model.Employee{
-			Name:           "Alice",
+			Name:             "Alice",
 			OrganizationName: "org-1",
-			Email:          "alice@example.com",
-			Password:       "supersecret",
+			Email:            "alice@example.com",
+			Password:         "supersecret",
 		})
 		if err != nil {
 			t.Fatalf("Register: %v", err)
@@ -1084,11 +1092,11 @@ func newAssignTestService(t *testing.T) (*EmployeeService, *fakeRepo, map[string
 		byID:    make(map[string]*model.Employee),
 	}
 	people := map[string]*model.Employee{
-		"admin":  {ID: "id-admin", Name: "Admin", OrganizationName: "org-1", Role: model.RoleOrgAdmin, Email: "admin@example.com"},
-		"alice":  {ID: "id-alice", Name: "Alice", OrganizationName: "org-1", Role: model.RoleUser, Email: "alice@example.com"},
-		"bob":    {ID: "id-bob", Name: "Bob", OrganizationName: "org-1", Role: model.RoleUser, Email: "bob@example.com"},
-		"carol":  {ID: "id-carol", Name: "Carol", OrganizationName: "org-1", Role: model.RoleUser, Email: "carol@example.com"},
-		"dave":   {ID: "id-dave", Name: "Dave", OrganizationName: "org-1", Role: model.RoleUser, Email: "dave@example.com"},
+		"admin":    {ID: "id-admin", Name: "Admin", OrganizationName: "org-1", Role: model.RoleOrgAdmin, Email: "admin@example.com"},
+		"alice":    {ID: "id-alice", Name: "Alice", OrganizationName: "org-1", Role: model.RoleUser, Email: "alice@example.com"},
+		"bob":      {ID: "id-bob", Name: "Bob", OrganizationName: "org-1", Role: model.RoleUser, Email: "bob@example.com"},
+		"carol":    {ID: "id-carol", Name: "Carol", OrganizationName: "org-1", Role: model.RoleUser, Email: "carol@example.com"},
+		"dave":     {ID: "id-dave", Name: "Dave", OrganizationName: "org-1", Role: model.RoleUser, Email: "dave@example.com"},
 		"outsider": {ID: "id-outsider", Name: "Outsider", OrganizationName: "org-2", Role: model.RoleOrgAdmin, Email: "outsider@example.com"},
 	}
 	for _, e := range people {

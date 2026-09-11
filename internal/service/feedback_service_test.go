@@ -314,7 +314,7 @@ func newFeedbackTestService() (*FeedbackService, *fakeFeedbackRepo, *fakePeriodL
 	repo := &fakeFeedbackRepo{}
 	periods := &fakePeriodLookup{}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewFeedbackService(repo, periods, nil, logger), repo, periods
+	return NewFeedbackService(repo, periods, nil, nil, logger), repo, periods
 }
 
 // validFeedbackInput returns a feedback with all required fields and valid
@@ -447,7 +447,7 @@ func TestFeedback_Create(t *testing.T) {
 				return nil, errors.New("db down")
 			},
 		}
-		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		_, err := svc.Create(context.Background(), "reviewer-1", validFeedbackInput())
 		if err == nil {
 			t.Fatal("expected repository error to propagate, got nil")
@@ -639,7 +639,7 @@ func TestFeedback_ListByReviewee(t *testing.T) {
 				"reviewee-1": buildFeedbacks(2),
 			},
 		}
-		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 		got, nextCursor, err := svc.ListByReviewee(context.Background(), "reviewee-1", 0, "")
 		if err != nil {
@@ -665,7 +665,7 @@ func TestFeedback_ListByReviewee(t *testing.T) {
 				return []*model.Feedback{}, "", nil
 			},
 		}
-		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 		if _, _, err := svc.ListByReviewee(context.Background(), "reviewee-1", 5, "fb-3"); err != nil {
 			t.Fatalf("ListByReviewee: unexpected error: %v", err)
@@ -689,7 +689,7 @@ func TestFeedback_ListByReviewee(t *testing.T) {
 				return []*model.Feedback{}, "", nil
 			},
 		}
-		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		if _, _, err := svc.ListByReviewee(context.Background(), "reviewee-1", 0, ""); err != nil {
 			t.Fatalf("ListByReviewee: unexpected error: %v", err)
 		}
@@ -706,7 +706,7 @@ func TestFeedback_ListByReviewee(t *testing.T) {
 				return []*model.Feedback{}, "", nil
 			},
 		}
-		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		if _, _, err := svc.ListByReviewee(context.Background(), "reviewee-1", 9999, ""); err != nil {
 			t.Fatalf("ListByReviewee: unexpected error: %v", err)
 		}
@@ -723,7 +723,7 @@ func TestFeedback_ListByReviewee(t *testing.T) {
 				"reviewee-1": buildFeedbacks(5),
 			},
 		}
-		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 		page1, cursor1, err := svc.ListByReviewee(context.Background(), "reviewee-1", 2, "")
 		if err != nil {
@@ -781,7 +781,7 @@ func TestFeedback_ListByReviewee(t *testing.T) {
 				"reviewee-1": buildFeedbacks(1),
 			},
 		}
-		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		_, _, err := svc.ListByReviewee(context.Background(), "reviewee-1", 10, "does-not-exist")
 		if err == nil {
 			t.Fatal("expected error for unknown cursor, got nil")
@@ -797,7 +797,7 @@ func TestFeedback_ListByReviewee(t *testing.T) {
 				return nil, "", errors.New("db down")
 			},
 		}
-		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		_, _, err := svc.ListByReviewee(context.Background(), "reviewee-1", 10, "")
 		if err == nil {
 			t.Fatal("expected repository error to propagate, got nil")
@@ -855,7 +855,7 @@ func newManagerTestService(t *testing.T) (*FeedbackService, *fakeFeedbackRepo) {
 		},
 	}}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewFeedbackService(repo, &fakePeriodLookup{}, employees, logger), repo
+	return NewFeedbackService(repo, &fakePeriodLookup{}, employees, nil, logger), repo
 }
 
 func TestFeedback_ListByRevieweeForManager(t *testing.T) {
@@ -900,7 +900,7 @@ func TestFeedback_ListByRevieweeForManager(t *testing.T) {
 
 	t.Run("fails closed without employee lookup", func(t *testing.T) {
 		repo := &fakeFeedbackRepo{}
-		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 		_, _, err := svc.ListByRevieweeForManager(context.Background(), "manager-1", "reviewee-1", 0, "")
 		if !errors.Is(err, apperror.ErrForbidden) {
@@ -1051,7 +1051,7 @@ func TestFeedback_CreateDraft(t *testing.T) {
 			return &model.FeedbackPeriod{ID: id, StartDate: time.Now().Add(24 * time.Hour), EndDate: time.Now().Add(48 * time.Hour)}, nil
 		}
 		repo := &fakeFeedbackRepo{}
-		svc := NewFeedbackService(repo, periods, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, periods, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 		if _, err := svc.CreateDraft(context.Background(), "reviewer-1", draftInput()); err != nil {
 			t.Fatalf("CreateDraft during closed window: unexpected error: %v", err)
@@ -1290,7 +1290,7 @@ func TestFeedback_SubmitDraft(t *testing.T) {
 			return &model.FeedbackPeriod{ID: id, StartDate: time.Now().Add(24 * time.Hour), EndDate: time.Now().Add(48 * time.Hour)}, nil
 		}
 		repo := &fakeFeedbackRepo{}
-		svc := NewFeedbackService(repo, periods, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, periods, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 		created, err := svc.CreateDraft(context.Background(), "reviewer-1", completeDraft())
 		if err != nil {
@@ -1308,7 +1308,7 @@ func TestFeedback_SubmitDraft(t *testing.T) {
 			return &model.FeedbackPeriod{ID: id, StartDate: time.Now().Add(-48 * time.Hour), EndDate: time.Now().Add(-24 * time.Hour)}, nil
 		}
 		repo := &fakeFeedbackRepo{}
-		svc := NewFeedbackService(repo, periods, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, periods, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 		created, err := svc.CreateDraft(context.Background(), "reviewer-1", completeDraft())
 		if err != nil {
@@ -1420,7 +1420,7 @@ func TestFeedback_ListMyDrafts(t *testing.T) {
 			stored := *d
 			repo.drafts[d.ID] = &stored
 		}
-		return NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		return NewFeedbackService(repo, &fakePeriodLookup{}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	}
 
 	t.Run("returns only the caller's drafts, newest first", func(t *testing.T) {
@@ -1462,7 +1462,7 @@ func TestFeedback_ListMyDrafts(t *testing.T) {
 				return []*model.Feedback{}, "", nil
 			},
 		}
-		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 		if _, _, err := svc.ListMyDrafts(context.Background(), "reviewer-1", 5, "draft-2"); err != nil {
 			t.Fatalf("ListMyDrafts: %v", err)
@@ -1477,7 +1477,7 @@ func TestFeedback_ListMyDrafts(t *testing.T) {
 				return []*model.Feedback{}, "", nil
 			},
 		}
-		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 		if _, _, err := svc.ListMyDrafts(context.Background(), "reviewer-1", 0, ""); err != nil {
 			t.Fatalf("ListMyDrafts: %v", err)
@@ -1525,7 +1525,7 @@ func TestFeedback_ListMyGivenFeedbacks(t *testing.T) {
 		for _, f := range seed {
 			repo.byReviewee[f.RevieweeID] = append(repo.byReviewee[f.RevieweeID], f)
 		}
-		return NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		return NewFeedbackService(repo, &fakePeriodLookup{}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	}
 
 	t.Run("returns only the caller's submitted entries, newest first", func(t *testing.T) {
@@ -1568,7 +1568,7 @@ func TestFeedback_ListMyGivenFeedbacks(t *testing.T) {
 				return []*model.Feedback{}, "", nil
 			},
 		}
-		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 		if _, _, err := svc.ListMyGivenFeedbacks(context.Background(), "reviewer-1", 5, "given-2"); err != nil {
 			t.Fatalf("ListMyGivenFeedbacks: %v", err)
@@ -1583,7 +1583,7 @@ func TestFeedback_ListMyGivenFeedbacks(t *testing.T) {
 				return []*model.Feedback{}, "", nil
 			},
 		}
-		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, &fakePeriodLookup{}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 		if _, _, err := svc.ListMyGivenFeedbacks(context.Background(), "reviewer-1", 0, ""); err != nil {
 			t.Fatalf("ListMyGivenFeedbacks: %v", err)
@@ -1634,7 +1634,7 @@ func TestFeedback_Create_PeriodWindow(t *testing.T) {
 			return &model.FeedbackPeriod{ID: id, StartDate: time.Now().Add(24 * time.Hour), EndDate: time.Now().Add(48 * time.Hour)}, nil
 		}
 		repo := &fakeFeedbackRepo{}
-		svc := NewFeedbackService(repo, periods, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, periods, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 		_, err := svc.Create(context.Background(), "reviewer-1", validFeedbackInput())
 		if !errors.Is(err, apperror.ErrFeedbackPeriodClosed) {
@@ -1648,7 +1648,7 @@ func TestFeedback_Create_PeriodWindow(t *testing.T) {
 			return &model.FeedbackPeriod{ID: id, StartDate: time.Now().Add(-48 * time.Hour), EndDate: time.Now().Add(-24 * time.Hour)}, nil
 		}
 		repo := &fakeFeedbackRepo{}
-		svc := NewFeedbackService(repo, periods, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		svc := NewFeedbackService(repo, periods, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 		_, err := svc.Create(context.Background(), "reviewer-1", validFeedbackInput())
 		if !errors.Is(err, apperror.ErrFeedbackPeriodClosed) {

@@ -24,3 +24,9 @@ var ErrNilFeedbackPeriodID = errors.New("feedback period ID must not be nil or e
 var ErrNilFeedback = errors.New("feedback must not be nil")
 
 var ErrNilFeedbackID = errors.New("feedback ID must not be nil or empty")
+
+// ErrNilFeedbackRequest is returned when a nil feedback request is provided
+// to a repository method that requires a non-nil request.
+var ErrNilFeedbackRequest = errors.New("feedback request must not be nil")
+
+var ErrNilFeedbackRequestID = errors.New("feedback request ID must not be nil or empty")
