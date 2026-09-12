@@ -48,14 +48,14 @@ type FeedbackRequestService struct {
 // NewFeedbackRequestService creates a FeedbackRequestService backed by the
 // given repository, period lookup, employee lookup, and mailer. If logger is
 // nil, slog.Default() is used. mailer may be nil to disable the notification
-// email (useful in tests); periods and employees may likewise be nil in
-// tests, but Create fails closed then, since the request's period and
+// email (useful in tests); periodLookup and employeeLookup may likewise be nil
+// in tests, but Create fails closed then, since the request's period and
 // requestee cannot be validated.
-func NewFeedbackRequestService(repo FeedbackRequestRepository, periods FeedbackPeriodLookup, employees EmployeeLookup, mailer Mailer, logger *slog.Logger) *FeedbackRequestService {
+func NewFeedbackRequestService(feedbackRequestRepo FeedbackRequestRepository, periodLookup FeedbackPeriodLookup, employeeLookup EmployeeLookup, mailer Mailer, logger *slog.Logger) *FeedbackRequestService {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &FeedbackRequestService{feedbackRequestRepo: repo, periodLookup: periods, employeeLookup: employees, mailer: mailer, logger: logger}
+	return &FeedbackRequestService{feedbackRequestRepo: feedbackRequestRepo, periodLookup: periodLookup, employeeLookup: employeeLookup, mailer: mailer, logger: logger}
 }
 
 // Create records a request from the authenticated employee (the requester)
