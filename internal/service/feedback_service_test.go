@@ -1192,7 +1192,7 @@ func TestFeedback_UpdateDraft(t *testing.T) {
 		// read (GetDraft inside UpdateDraft) and its write: the hook bumps the
 		// stored UpdatedAt just before the repository compares them, exactly
 		// where a real Firestore transaction would detect the race.
-		repo := svc.repo.(*fakeFeedbackRepo)
+		repo := svc.feedbackRepo.(*fakeFeedbackRepo)
 		injected := repo.updateDraftFn
 		repo.updateDraftFn = func(ctx context.Context, feedback *model.Feedback) (*model.Feedback, error) {
 			stored := repo.drafts[feedback.ID]
