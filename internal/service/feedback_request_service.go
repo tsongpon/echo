@@ -38,11 +38,11 @@ const (
 // via the injected FeedbackPeriodLookup and that the requestee is a
 // colleague of the caller via the injected EmployeeLookup before persisting.
 type FeedbackRequestService struct {
-	repo      FeedbackRequestRepository
-	periods   FeedbackPeriodLookup
-	employees EmployeeLookup
-	mailer    Mailer
-	logger    *slog.Logger
+	feedbackRequestRepo FeedbackRequestRepository
+	periodLookup        FeedbackPeriodLookup
+	employeeLookup      EmployeeLookup
+	mailer              Mailer
+	logger              *slog.Logger
 }
 
 // NewFeedbackRequestService creates a FeedbackRequestService backed by the
@@ -55,7 +55,7 @@ func NewFeedbackRequestService(repo FeedbackRequestRepository, periods FeedbackP
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &FeedbackRequestService{repo: repo, periods: periods, employees: employees, mailer: mailer, logger: logger}
+	return &FeedbackRequestService{feedbackRequestRepo: repo, periodLookup: periods, employeeLookup: employees, mailer: mailer, logger: logger}
 }
 
 // Create records a request from the authenticated employee (the requester)
@@ -80,7 +80,7 @@ func (s *FeedbackRequestService) Create(ctx context.Context, requesterID string,
 		return nil, apperror.ErrInvalidFeedbackRequest("requester_id is required")
 	}
 
-	requester, err := s.employees.GetByID(ctx, requesterID)
+	requester, err := s.employeeLookup.GetByID(ctx, requesterID)
 	if err != nil {
 		if errors.Is(err, apperror.ErrEmployeeNotFound) {
 			s.logger.Warn("feedback request create rejected: requester not found", "requester_id", requesterID)
@@ -95,7 +95,7 @@ func (s *FeedbackRequestService) Create(ctx context.Context, requesterID string,
 		s.logger.Warn("feedback request create rejected: missing period_id", "requester_id", requesterID)
 		return nil, apperror.ErrInvalidFeedbackRequest("period_id is required")
 	}
-	period, err := s.periods.GetByID(ctx, request.PeriodID)
+	period, err := s.periodLookup.GetByID(ctx, request.PeriodID)
 	if err != nil {
 		if errors.Is(err, apperror.ErrFeedbackPeriodNotFound) {
 			s.logger.Warn("feedback request create rejected: period not found",
@@ -115,7 +115,7 @@ func (s *FeedbackRequestService) Create(ctx context.Context, requesterID string,
 		s.logger.Warn("feedback request create rejected: self-request", "requester_id", requesterID, "period_id", request.PeriodID)
 		return nil, apperror.ErrInvalidFeedbackRequest("requester cannot ask themselves for feedback")
 	}
-	requestee, err := s.employees.GetByID(ctx, request.RequesteeID)
+	requestee, err := s.employeeLookup.GetByID(ctx, request.RequesteeID)
 	if err != nil {
 		if errors.Is(err, apperror.ErrEmployeeNotFound) {
 			s.logger.Warn("feedback request create rejected: requestee not found",
@@ -141,7 +141,7 @@ func (s *FeedbackRequestService) Create(ctx context.Context, requesterID string,
 	}
 	request.ID = id.String()
 
-	created, err := s.repo.Create(ctx, request)
+	created, err := s.feedbackRequestRepo.Create(ctx, request)
 	if err != nil {
 		if errors.Is(err, apperror.ErrFeedbackRequestAlreadyExists) {
 			s.logger.Warn("feedback request create rejected: request already exists",
@@ -180,7 +180,7 @@ func (s *FeedbackRequestService) Decline(ctx context.Context, callerID, requestI
 		return nil, apperror.ErrInvalidFeedbackRequest("request_id is required")
 	}
 
-	request, err := s.repo.Get(ctx, requestID)
+	request, err := s.feedbackRequestRepo.Get(ctx, requestID)
 	if err != nil {
 		return nil, err
 	}
@@ -193,7 +193,7 @@ func (s *FeedbackRequestService) Decline(ctx context.Context, callerID, requestI
 		return nil, apperror.ErrFeedbackRequestNotFound
 	}
 
-	declined, err := s.repo.SetStatus(ctx, requestID, model.FeedbackRequestStatusDeclined)
+	declined, err := s.feedbackRequestRepo.SetStatus(ctx, requestID, model.FeedbackRequestStatusDeclined)
 	if err != nil {
 		if errors.Is(err, apperror.ErrFeedbackRequestNotFound) {
 			// The request was completed or declined concurrently.
@@ -228,7 +228,7 @@ func (s *FeedbackRequestService) List(ctx context.Context, callerID, direction s
 	}
 
 	if direction == "sent" {
-		requests, nextCursorID, err := s.repo.ListByRequester(ctx, callerID, limit, cursorID)
+		requests, nextCursorID, err := s.feedbackRequestRepo.ListByRequester(ctx, callerID, limit, cursorID)
 		if err != nil {
 			if errors.Is(err, apperror.ErrFeedbackRequestNotFound) {
 				// An unknown cursor is a caller error, not a service failure.
@@ -240,7 +240,7 @@ func (s *FeedbackRequestService) List(ctx context.Context, callerID, direction s
 		return requests, nextCursorID, nil
 	}
 
-	requests, nextCursorID, err := s.repo.ListByRequestee(ctx, callerID, limit, cursorID)
+	requests, nextCursorID, err := s.feedbackRequestRepo.ListByRequestee(ctx, callerID, limit, cursorID)
 	if err != nil {
 		if errors.Is(err, apperror.ErrFeedbackRequestNotFound) {
 			// An unknown cursor is a caller error, not a service failure.
@@ -260,7 +260,7 @@ func (s *FeedbackRequestService) List(ctx context.Context, callerID, direction s
 // returned as apperror.ErrFeedbackRequestNotFound, which the feedback service
 // treats as "nothing to complete" (logged, never an error the submitter sees).
 func (s *FeedbackRequestService) CloseMatchingOpen(ctx context.Context, requesterID, requesteeID, periodID string) error {
-	_, err := s.repo.CloseMatchingOpen(ctx, requesterID, requesteeID, periodID)
+	_, err := s.feedbackRequestRepo.CloseMatchingOpen(ctx, requesterID, requesteeID, periodID)
 	if err != nil {
 		if errors.Is(err, apperror.ErrFeedbackRequestNotFound) {
 			// No open request matched: the common case, not a failure.
