@@ -26,17 +26,17 @@ type FeedbackRequestService interface {
 // FeedbackRequestHandler exposes HTTP endpoints for feedback-request
 // operations.
 type FeedbackRequestHandler struct {
-	requests FeedbackRequestService
-	logger   *slog.Logger
+	feedbackRequestService FeedbackRequestService
+	logger                 *slog.Logger
 }
 
 // NewFeedbackRequestHandler creates a FeedbackRequestHandler backed by the
 // given service. If logger is nil, slog.Default() is used.
-func NewFeedbackRequestHandler(requests FeedbackRequestService, logger *slog.Logger) *FeedbackRequestHandler {
+func NewFeedbackRequestHandler(feedbackRequestService FeedbackRequestService, logger *slog.Logger) *FeedbackRequestHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &FeedbackRequestHandler{requests: requests, logger: logger}
+	return &FeedbackRequestHandler{feedbackRequestService: feedbackRequestService, logger: logger}
 }
 
 // Create handles POST /v1/feedback-requests: asks a colleague for feedback
@@ -61,7 +61,7 @@ func (h *FeedbackRequestHandler) Create(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
 
-	created, err := h.requests.Create(c.Request().Context(), claims.Subject, req.ToFeedbackRequest())
+	created, err := h.feedbackRequestService.Create(c.Request().Context(), claims.Subject, req.ToFeedbackRequest())
 	if err != nil {
 		return mapRequestError(err, h.logger, "feedback request create", claims.Subject)
 	}
@@ -97,7 +97,7 @@ func (h *FeedbackRequestHandler) List(c *echo.Context) error {
 	cursorID := c.QueryParam("cursor")
 	direction := c.QueryParam("direction")
 
-	requests, nextCursorID, err := h.requests.List(c.Request().Context(), claims.Subject, direction, limit, cursorID)
+	requests, nextCursorID, err := h.feedbackRequestService.List(c.Request().Context(), claims.Subject, direction, limit, cursorID)
 	if err != nil {
 		if errors.Is(err, apperror.ErrFeedbackRequestNotFound) && cursorID != "" {
 			// On the list path a not-found means the cursor was unknown: 400,
@@ -125,7 +125,7 @@ func (h *FeedbackRequestHandler) Decline(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusUnauthorized, "missing or invalid token")
 	}
 
-	declined, err := h.requests.Decline(c.Request().Context(), claims.Subject, c.Param("id"))
+	declined, err := h.feedbackRequestService.Decline(c.Request().Context(), claims.Subject, c.Param("id"))
 	if err != nil {
 		return mapRequestError(err, h.logger, "feedback request decline", claims.Subject)
 	}
