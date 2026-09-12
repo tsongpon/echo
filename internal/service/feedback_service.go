@@ -117,19 +117,19 @@ func validatePeriodOpen(period *model.FeedbackPeriod) error {
 
 // NewFeedbackService creates a FeedbackService backed by the given feedback
 // repository, feedback-period lookup, employee lookup, and feedback-request
-// closer. If logger is nil, slog.Default() is used. periods may be nil to
-// disable period-existence validation (useful in tests that don't care about
-// the period); in production it should always be provided. employees may
-// likewise be nil in tests, but ListByRevieweeForManager fails closed when it
-// is nil (the manager-view authorization cannot be performed without it).
-// requests may be nil to disable request completion (tests); in production
-// it should be the FeedbackRequestService so submitted feedback completes
-// the matching open request, best-effort.
-func NewFeedbackService(repo FeedbackRepository, periods FeedbackPeriodLookup, employees EmployeeLookup, requests FeedbackRequestCloser, logger *slog.Logger) *FeedbackService {
+// closer. If logger is nil, slog.Default() is used. periodLookup may be nil
+// to disable period-existence validation (useful in tests that don't care
+// about the period); in production it should always be provided.
+// employeeLookup may likewise be nil in tests, but ListByRevieweeForManager
+// fails closed when it is nil (the manager-view authorization cannot be
+// performed without it). feedbackRequestCloser may be nil to disable request
+// completion (tests); in production it should be the FeedbackRequestService
+// so submitted feedback completes the matching open request, best-effort.
+func NewFeedbackService(feedbackRepo FeedbackRepository, periodLookup FeedbackPeriodLookup, employeeLookup EmployeeLookup, feedbackRequestCloser FeedbackRequestCloser, logger *slog.Logger) *FeedbackService {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &FeedbackService{feedbackRepo: repo, periodLookup: periods, employeeLookup: employees, feedbackRequestCloser: requests, logger: logger}
+	return &FeedbackService{feedbackRepo: feedbackRepo, periodLookup: periodLookup, employeeLookup: employeeLookup, feedbackRequestCloser: feedbackRequestCloser, logger: logger}
 }
 
 // closeMatchingRequests completes the open feedback request — if any — that
