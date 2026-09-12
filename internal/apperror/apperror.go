@@ -106,6 +106,18 @@ var ErrFeedbackPeriodClosed = errors.New("feedback period is not open for submis
 // the handler can map it to a 409 without importing lower layers.
 var ErrFeedbackConcurrentUpdate = errors.New("feedback draft was modified concurrently")
 
+// ErrFeedbackRequestAlreadyExists is returned when the requester already has
+// an open request for the same (requestee, period) pair. A unique-constraint
+// ledger document backs this rule, so it is enforced atomically at create
+// time; declining or completing the request releases the slot.
+var ErrFeedbackRequestAlreadyExists = errors.New("an open request for this colleague and period already exists")
+
+// ErrFeedbackRequestNotFound is returned when no feedback request matches a
+// lookup for the caller. Like drafts, a request that belongs to anyone else
+// is indistinguishable from one that does not exist, so the same sentinel
+// covers both.
+var ErrFeedbackRequestNotFound = errors.New("feedback request not found")
+
 // ErrInvalidFeedback indicates a validation failure of a feedback input. It
 // carries a human-readable message describing the failed validation.
 type ErrInvalidFeedback string
@@ -115,5 +127,18 @@ func (e ErrInvalidFeedback) Error() string { return string(e) }
 // IsInvalidFeedback reports whether err is an ErrInvalidFeedback.
 func IsInvalidFeedback(err error) bool {
 	var target ErrInvalidFeedback
+	return errors.As(err, &target)
+}
+
+// ErrInvalidFeedbackRequest indicates a validation failure of a
+// feedback-request input. It carries a human-readable message describing the
+// failed validation.
+type ErrInvalidFeedbackRequest string
+
+func (e ErrInvalidFeedbackRequest) Error() string { return string(e) }
+
+// IsInvalidFeedbackRequest reports whether err is an ErrInvalidFeedbackRequest.
+func IsInvalidFeedbackRequest(err error) bool {
+	var target ErrInvalidFeedbackRequest
 	return errors.As(err, &target)
 }

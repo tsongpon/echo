@@ -110,6 +110,80 @@ func (m *ResendMailer) verificationLink(token string) string {
 	return base + "/v1/verify-email?token=" + token
 }
 
+// SendFeedbackRequestEmail composes a feedback-request notification for the
+// given recipient and sends it through the Resend API. Delivery failure is
+// returned to the caller, which treats it as best-effort (logged, never
+// blocking request creation).
+func (m *ResendMailer) SendFeedbackRequestEmail(ctx context.Context, to, requesterName, periodName string) error {
+	subject, html, text := m.composeFeedbackRequestEmail(requesterName, periodName)
+
+	body, err := json.Marshal(resendEmailRequest{
+		From:    m.from,
+		To:      []string{to},
+		Subject: subject,
+		HTML:    html,
+		Text:    text,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal resend request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.apiBase+"/emails", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build resend request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+m.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := m.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("send resend request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("resend API returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	m.logger.Info("feedback request email sent", "to", to, "from", m.from)
+	return nil
+}
+
+// appBaseURL returns the configured origin for the email's action button,
+// falling back to the local default.
+func (m *ResendMailer) appBaseURL() string {
+	if m.baseURL == "" {
+		return "http://localhost:1323"
+	}
+	return m.baseURL
+}
+
+// composeFeedbackRequestEmail builds the subject and the HTML/text bodies for
+// the feedback-request notification. The requester and period names are the
+// only variable content, so the bodies are constant aside from them.
+func (m *ResendMailer) composeFeedbackRequestEmail(requesterName, periodName string) (subject, html, text string) {
+	subject = requesterName + " asked you for feedback"
+
+	text = "Hi!\n\n" +
+		requesterName + " asked you for feedback in the \"" + periodName + "\" cycle.\n\n" +
+		"Open 360 Feedback to write and submit your feedback. Your feedback visibility choice applies as usual — you can stay anonymous if you prefer.\n\n" +
+		"If you are not sure why you received this, you can ignore it.\n"
+
+	html = `<!doctype html>
+<html lang="en">
+  <body style="font-family: Arial, Helvetica, sans-serif; color: #1f2937; max-width: 560px; margin: 0 auto; padding: 24px;">
+    <h1 style="font-size: 20px; margin: 0 0 16px;">` + requesterName + ` asked you for feedback</h1>
+    <p style="margin: 0 0 16px;">They would like your feedback in the <strong>` + periodName + `</strong> cycle.</p>
+    <p style="margin: 0 0 24px;">
+      <a href="` + m.appBaseURL() + `" style="display: inline-block; background-color: #2563eb; color: #ffffff; text-decoration: none; padding: 12px 20px; border-radius: 6px; font-weight: 600;">Open 360 Feedback</a>
+    </p>
+    <p style="margin: 0; font-size: 14px; color: #6b7280;">Your visibility choice applies as usual — you can stay anonymous if you prefer. If you are not sure why you received this, you can ignore it.</p>
+  </body>
+</html>`
+	return subject, html, text
+}
+
 // composeVerificationEmail builds the subject and the HTML/text bodies for the
 // email-address verification message. The link is the only variable content,
 // so the bodies are constant aside from it. The token expires after 24 hours

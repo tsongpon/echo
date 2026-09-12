@@ -36,3 +36,11 @@ func (m *LogMailer) SendVerificationEmail(_ context.Context, to, token string) e
 	m.logger.Info("verification email", "to", to, "url", base+"/v1/verify-email?token="+token)
 	return nil
 }
+
+// SendFeedbackRequestEmail logs the feedback request. It never fails, so
+// request creation is not blocked by email delivery in local dev.
+func (m *LogMailer) SendFeedbackRequestEmail(_ context.Context, to, requesterName, periodName string) error {
+	m.logger.Info("feedback request email",
+		"to", to, "requester", requesterName, "period", periodName)
+	return nil
+}

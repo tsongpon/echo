@@ -55,16 +55,26 @@ type EmployeeLookup interface {
 	GetByID(ctx context.Context, id string) (*model.Employee, error)
 }
 
+// FeedbackRequestCloser is the consumer-defined contract for completing a
+// feedback request when its matching feedback is submitted. The feedback
+// service calls it after a successful create/submit; the concrete
+// FeedbackRequestService implements it. Keeping the contract to one method
+// means the feedback service knows nothing about request storage.
+type FeedbackRequestCloser interface {
+	CloseMatchingOpen(ctx context.Context, requesterID, requesteeID, periodID string) error
+}
+
 // FeedbackService is the application layer that orchestrates feedback
 // operations against a FeedbackRepository. It validates that a feedback entry's
 // period_id refers to an existing feedback period via the injected
 // FeedbackPeriodLookup before persisting, and authorizes the manager-view
 // listing via the injected EmployeeLookup.
 type FeedbackService struct {
-	repo      FeedbackRepository
-	periods   FeedbackPeriodLookup
-	employees EmployeeLookup
-	logger    *slog.Logger
+	feedbackRepo          FeedbackRepository
+	periodLookup          FeedbackPeriodLookup
+	employeeLookup        EmployeeLookup
+	feedbackRequestCloser FeedbackRequestCloser
+	logger                *slog.Logger
 }
 
 // periodFor loads and returns the feedback period referenced by id, mapping a
@@ -72,10 +82,10 @@ type FeedbackService struct {
 // unchanged. Shared by the create and submit paths, which both must enforce
 // that the period exists and is open.
 func (s *FeedbackService) periodFor(ctx context.Context, reviewerID string, feedback *model.Feedback) (*model.FeedbackPeriod, error) {
-	if s.periods == nil {
+	if s.periodLookup == nil {
 		return nil, nil
 	}
-	period, err := s.periods.GetByID(ctx, feedback.PeriodID)
+	period, err := s.periodLookup.GetByID(ctx, feedback.PeriodID)
 	if err != nil {
 		if errors.Is(err, apperror.ErrFeedbackPeriodNotFound) {
 			s.logger.Warn("feedback period lookup failed: period not found",
@@ -106,17 +116,38 @@ func validatePeriodOpen(period *model.FeedbackPeriod) error {
 }
 
 // NewFeedbackService creates a FeedbackService backed by the given feedback
-// repository, feedback-period lookup, and employee lookup. If logger is nil,
-// slog.Default() is used. periods may be nil to disable period-existence
-// validation (useful in tests that don't care about the period); in production
-// it should always be provided. employees may likewise be nil in tests, but
-// ListByRevieweeForManager fails closed when it is nil (the manager-view
-// authorization cannot be performed without it).
-func NewFeedbackService(repo FeedbackRepository, periods FeedbackPeriodLookup, employees EmployeeLookup, logger *slog.Logger) *FeedbackService {
+// repository, feedback-period lookup, employee lookup, and feedback-request
+// closer. If logger is nil, slog.Default() is used. periodLookup may be nil
+// to disable period-existence validation (useful in tests that don't care
+// about the period); in production it should always be provided.
+// employeeLookup may likewise be nil in tests, but ListByRevieweeForManager
+// fails closed when it is nil (the manager-view authorization cannot be
+// performed without it). feedbackRequestCloser may be nil to disable request
+// completion (tests); in production it should be the FeedbackRequestService
+// so submitted feedback completes the matching open request, best-effort.
+func NewFeedbackService(feedbackRepo FeedbackRepository, periodLookup FeedbackPeriodLookup, employeeLookup EmployeeLookup, feedbackRequestCloser FeedbackRequestCloser, logger *slog.Logger) *FeedbackService {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &FeedbackService{repo: repo, periods: periods, employees: employees, logger: logger}
+	return &FeedbackService{feedbackRepo: feedbackRepo, periodLookup: periodLookup, employeeLookup: employeeLookup, feedbackRequestCloser: feedbackRequestCloser, logger: logger}
+}
+
+// closeMatchingRequests completes the open feedback request — if any — that
+// the reviewee (the person the feedback is about... reversed here: the
+// reviewer just wrote feedback about revieweeID, so any request FROM
+// revieweeID TO the reviewer in this period is fulfilled) matching the
+// just-submitted feedback. Best-effort: a failure is logged and never
+// surfaces to the submitter, because the feedback itself is already durable.
+func (s *FeedbackService) closeMatchingRequests(ctx context.Context, reviewerID, revieweeID, periodID string) {
+	if s.feedbackRequestCloser == nil {
+		return
+	}
+	// The reviewer wrote feedback about the reviewee, so the fulfilled request
+	// is: requester = revieweeID, requestee = reviewerID, in this period.
+	if err := s.feedbackRequestCloser.CloseMatchingOpen(ctx, revieweeID, reviewerID, periodID); err != nil {
+		s.logger.Error("failed to complete matching feedback request",
+			"error", err, "reviewer_id", reviewerID, "reviewee_id", revieweeID, "period_id", periodID)
+	}
 }
 
 // Create creates a new submitted feedback entry after validating the input.
@@ -225,12 +256,17 @@ func (s *FeedbackService) Create(ctx context.Context, reviewerID string, feedbac
 	}
 	feedback.ID = id.String()
 
-	created, err := s.repo.Create(ctx, feedback)
+	created, err := s.feedbackRepo.Create(ctx, feedback)
 	if err != nil {
 		s.logger.Error("feedback create aborted: repository create failed",
 			"error", err, "feedback_id", feedback.ID, "reviewer_id", reviewerID, "reviewee_id", feedback.RevieweeID, "period_id", feedback.PeriodID)
 		return nil, err
 	}
+
+	// The submitted feedback may fulfill an open request from the reviewee to
+	// the reviewer in this period; complete it best-effort.
+	s.closeMatchingRequests(ctx, reviewerID, created.RevieweeID, created.PeriodID)
+
 	return created, nil
 }
 
@@ -301,7 +337,7 @@ func (s *FeedbackService) ListByReviewee(ctx context.Context, revieweeID string,
 		limit = MaxFeedbackListLimit
 	}
 
-	feedbacks, nextCursorID, err := s.repo.ListByReviewee(ctx, revieweeID, limit, cursorID)
+	feedbacks, nextCursorID, err := s.feedbackRepo.ListByReviewee(ctx, revieweeID, limit, cursorID)
 	if err != nil {
 		if errors.Is(err, apperror.ErrFeedbackNotFound) {
 			// An unknown cursor is a caller error, not a service failure.
@@ -342,7 +378,7 @@ func (s *FeedbackService) ListByRevieweeForManager(ctx context.Context, callerID
 		s.logger.Warn("manager feedback list rejected: missing reviewee_id", "caller_id", callerID)
 		return nil, "", apperror.ErrInvalidFeedback("reviewee_id is required")
 	}
-	if s.employees == nil {
+	if s.employeeLookup == nil {
 		// Fail closed: without an employee lookup the caller's right to see
 		// this reviewee's feedback cannot be established.
 		s.logger.Error("manager feedback list rejected: no employee lookup configured (miswired service?)",
@@ -350,7 +386,7 @@ func (s *FeedbackService) ListByRevieweeForManager(ctx context.Context, callerID
 		return nil, "", apperror.ErrForbidden
 	}
 
-	reviewee, err := s.employees.GetByID(ctx, revieweeID)
+	reviewee, err := s.employeeLookup.GetByID(ctx, revieweeID)
 	if err != nil {
 		if errors.Is(err, apperror.ErrEmployeeNotFound) {
 			s.logger.Warn("manager feedback list rejected: reviewee not found",
@@ -446,7 +482,7 @@ func (s *FeedbackService) CreateDraft(ctx context.Context, reviewerID string, fe
 	}
 	feedback.ID = id.String()
 
-	created, err := s.repo.CreateDraft(ctx, feedback)
+	created, err := s.feedbackRepo.CreateDraft(ctx, feedback)
 	if err != nil {
 		if errors.Is(err, apperror.ErrFeedbackDraftAlreadyExists) {
 			s.logger.Warn("draft create rejected: draft already exists",
@@ -466,7 +502,7 @@ func (s *FeedbackService) CreateDraft(ctx context.Context, reviewerID string, fe
 // private to its author, and revealing it exists (but is forbidden) would
 // leak that feedback is being written about them.
 func (s *FeedbackService) GetDraft(ctx context.Context, reviewerID, draftID string) (*model.Feedback, error) {
-	draft, err := s.repo.Get(ctx, draftID)
+	draft, err := s.feedbackRepo.Get(ctx, draftID)
 	if err != nil {
 		if errors.Is(err, apperror.ErrFeedbackNotFound) {
 			s.logger.Warn("draft get rejected: not found", "reviewer_id", reviewerID, "draft_id", draftID)
@@ -531,7 +567,7 @@ func (s *FeedbackService) UpdateDraft(ctx context.Context, reviewerID, draftID s
 	}
 	draft.Visibility = normalizeVisibility(draft.Visibility)
 
-	updated, err := s.repo.UpdateDraft(ctx, draft)
+	updated, err := s.feedbackRepo.UpdateDraft(ctx, draft)
 	if err != nil {
 		if errors.Is(err, apperror.ErrFeedbackNotFound) {
 			s.logger.Warn("draft update rejected: no longer a draft", "reviewer_id", reviewerID, "draft_id", draftID)
@@ -620,7 +656,7 @@ func (s *FeedbackService) SubmitDraft(ctx context.Context, reviewerID, draftID s
 	// Persist the final edits first, then transition. The update keeps the
 	// optimistic-concurrency guard; the submit re-reads and is idempotent-
 	// failing (ErrFeedbackNotFound once the entry is no longer a draft).
-	if _, err := s.repo.UpdateDraft(ctx, draft); err != nil {
+	if _, err := s.feedbackRepo.UpdateDraft(ctx, draft); err != nil {
 		if errors.Is(err, apperror.ErrFeedbackNotFound) {
 			s.logger.Warn("draft submit rejected: no longer a draft", "reviewer_id", reviewerID, "draft_id", draftID)
 			return nil, err
@@ -630,7 +666,7 @@ func (s *FeedbackService) SubmitDraft(ctx context.Context, reviewerID, draftID s
 		return nil, err
 	}
 
-	submitted, err := s.repo.SubmitDraft(ctx, draftID)
+	submitted, err := s.feedbackRepo.SubmitDraft(ctx, draftID)
 	if err != nil {
 		if errors.Is(err, apperror.ErrFeedbackNotFound) {
 			s.logger.Warn("draft submit rejected: no longer a draft", "reviewer_id", reviewerID, "draft_id", draftID)
@@ -640,6 +676,11 @@ func (s *FeedbackService) SubmitDraft(ctx context.Context, reviewerID, draftID s
 			"error", err, "reviewer_id", reviewerID, "draft_id", draftID)
 		return nil, err
 	}
+
+	// The submitted feedback may fulfill an open request from the reviewee to
+	// the reviewer in this period; complete it best-effort.
+	s.closeMatchingRequests(ctx, reviewerID, submitted.RevieweeID, submitted.PeriodID)
+
 	return submitted, nil
 }
 
@@ -652,7 +693,7 @@ func (s *FeedbackService) DeleteDraft(ctx context.Context, reviewerID, draftID s
 	if _, err := s.GetDraft(ctx, reviewerID, draftID); err != nil {
 		return err
 	}
-	if err := s.repo.DeleteDraft(ctx, draftID); err != nil {
+	if err := s.feedbackRepo.DeleteDraft(ctx, draftID); err != nil {
 		if errors.Is(err, apperror.ErrFeedbackNotFound) {
 			s.logger.Warn("draft delete rejected: no longer a draft", "reviewer_id", reviewerID, "draft_id", draftID)
 			return err
@@ -681,7 +722,7 @@ func (s *FeedbackService) ListMyDrafts(ctx context.Context, reviewerID string, l
 		limit = MaxDraftListLimit
 	}
 
-	drafts, nextCursorID, err := s.repo.ListDraftsByReviewer(ctx, reviewerID, limit, cursorID)
+	drafts, nextCursorID, err := s.feedbackRepo.ListDraftsByReviewer(ctx, reviewerID, limit, cursorID)
 	if err != nil {
 		if errors.Is(err, apperror.ErrFeedbackNotFound) {
 			// An unknown cursor is a caller error, not a service failure.
@@ -712,7 +753,7 @@ func (s *FeedbackService) ListMyGivenFeedbacks(ctx context.Context, reviewerID s
 		limit = MaxFeedbackListLimit
 	}
 
-	feedbacks, nextCursorID, err := s.repo.ListSubmittedByReviewer(ctx, reviewerID, limit, cursorID)
+	feedbacks, nextCursorID, err := s.feedbackRepo.ListSubmittedByReviewer(ctx, reviewerID, limit, cursorID)
 	if err != nil {
 		if errors.Is(err, apperror.ErrFeedbackNotFound) {
 			// An unknown cursor is a caller error, not a service failure.

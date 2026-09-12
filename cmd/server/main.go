@@ -133,7 +133,13 @@ func main() {
 	feedbackPeriodService := service.NewFeedbackPeriodService(feedbackPeriodRepo, nil)
 	feedbackPeriodHandler := handler.NewFeedbackPeriodHandler(feedbackPeriodService, nil)
 	feedbackRepo := repository.NewFeedbackFirestoreRepository(firestoreClient, nil)
-	feedbackService := service.NewFeedbackService(feedbackRepo, feedbackPeriodRepo, employeeRepo, nil)
+	// The feedback request service is built before the feedback service so
+	// the latter can consume it as a FeedbackRequestCloser: submitting
+	// feedback completes the matching open request, best-effort.
+	feedbackRequestRepo := repository.NewFeedbackRequestFirestoreRepository(firestoreClient, nil)
+	feedbackRequestService := service.NewFeedbackRequestService(feedbackRequestRepo, feedbackPeriodRepo, employeeRepo, buildMailer(), nil)
+	feedbackRequestHandler := handler.NewFeedbackRequestHandler(feedbackRequestService, nil)
+	feedbackService := service.NewFeedbackService(feedbackRepo, feedbackPeriodRepo, employeeRepo, feedbackRequestService, nil)
 	feedbackHandler := handler.NewFeedbackHandler(feedbackService, nil)
 
 	e.GET("/ping", func(c *echo.Context) error {
@@ -162,6 +168,9 @@ func main() {
 	e.PATCH("/v1/feedback-drafts/:id", feedbackHandler.UpdateFeedbackDraft, handler.Auth(tokenSigner))
 	e.POST("/v1/feedback-drafts/:id/submit", feedbackHandler.SubmitFeedbackDraft, handler.Auth(tokenSigner))
 	e.DELETE("/v1/feedback-drafts/:id", feedbackHandler.DeleteFeedbackDraft, handler.Auth(tokenSigner))
+	e.POST("/v1/feedback-requests", feedbackRequestHandler.Create, handler.Auth(tokenSigner))
+	e.GET("/v1/me/feedback-requests", feedbackRequestHandler.List, handler.Auth(tokenSigner))
+	e.POST("/v1/feedback-requests/:id/decline", feedbackRequestHandler.Decline, handler.Auth(tokenSigner))
 	e.GET("/v1/me/reports", employeeHandler.ListMyReports, handler.Auth(tokenSigner))
 	e.PATCH("/v1/employees/:id/manager", employeeHandler.AssignManager, handler.Auth(tokenSigner))
 	e.GET("/v1/employees/:id/feedbacks", feedbackHandler.ListEmployeeFeedbacks, handler.Auth(tokenSigner))

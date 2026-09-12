@@ -35,6 +35,12 @@ tags:
       Work-in-progress feedback entries private to their author. A draft is
       started, edited, and finally submitted (at which point it becomes a
       regular feedback entry), or deleted.
+  - name: Feedback Requests
+    description: |
+      Asks from one employee to another for feedback within a period. A
+      request is created open, and becomes completed automatically when the
+      requestee submits feedback for the requester in that period, or
+      declined explicitly by the requestee.
 
 # ----------------------------------------------------------------------------
 # Paths
@@ -916,6 +922,165 @@ paths:
               examples:
                 closed:
                   value: { message: "feedback period is not open for submission" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/feedback-requests:
+    post:
+      tags: [Feedback Requests]
+      summary: Ask a colleague for feedback
+      description: |
+        Creates a request from the authenticated employee (the requester) to
+        the named requestee for feedback within a feedback period. The
+        requester is taken from the JWT subject, so `requester_id` in the
+        body is ignored.
+
+        Validation:
+          * `requestee_id` is required, must refer to an existing employee
+            in the requester's organization, and must differ from the
+            requester (no self-requests).
+          * `period_id` is required and must refer to an existing feedback
+            period. The period's date window is intentionally NOT enforced:
+            a request may be made before the period opens.
+
+        At most one OPEN request may exist per (requester, requestee, period)
+        triple; a duplicate returns `409`. Declining or completing the
+        request releases the slot, so the requester may ask again.
+
+        On success the requestee is notified by email on a best-effort basis;
+        a delivery failure is logged and does not fail the create.
+      operationId: createFeedbackRequest
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateFeedbackRequestRequest"
+            examples:
+              ask:
+                value:
+                  requestee_id: 0190bbbb-0000-7000-8000-000000000000
+                  period_id: 0190abcd-0000-7000-8000-000000000000
+      responses:
+        "201":
+          description: The created request, with status "open".
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackRequestResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: The requester already has an open request for this (requestee, period) pair.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                exists:
+                  value: { message: "an open request for this colleague and period already exists" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/me/feedback-requests:
+    get:
+      tags: [Feedback Requests]
+      summary: List the caller's feedback requests
+      description: |
+        Returns one page of the caller's feedback requests, ordered by
+        `created_at` descending (newest first). The optional `direction` query
+        parameter selects the side: `received` (the default) lists requests
+        where the caller is the requestee; `sent` lists requests where the
+        caller is the requester. Requests in every status are listed.
+
+        Pagination is cursor-based: pass the `next_cursor` value from one
+        response as the `cursor` query parameter on the next request. When
+        `next_cursor` is `null` there are no more pages. An unknown cursor
+        returns `400 "unknown cursor"`.
+      operationId: listMyFeedbackRequests
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: direction
+          in: query
+          required: false
+          description: |
+            Which side of the request relationship to list: `received`
+            (default) for requests made to the caller, `sent` for requests
+            made by the caller.
+          schema:
+            type: string
+            enum: [received, sent]
+            default: received
+        - $ref: "#/components/parameters/ListLimit"
+        - $ref: "#/components/parameters/ListCursor"
+      responses:
+        "200":
+          description: One page of the caller's requests plus the next-page cursor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackRequestListResponse"
+        "400":
+          description: Unknown cursor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                unknownCursor:
+                  value: { message: "unknown cursor" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/feedback-requests/{id}/decline:
+    post:
+      tags: [Feedback Requests]
+      summary: Decline one of the caller's received requests
+      description: |
+        Transitions the named request to the declined state and releases its
+        (requester, requestee, period) slot, so the requester may ask again.
+
+        Only the requestee may decline; anyone else — like a request that does
+        not exist or is no longer open — gets `404` rather than `403`, so a
+        request's existence never leaks to other employees.
+      operationId: declineFeedbackRequest
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The request ID. Must belong to the caller as requestee.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The declined request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackRequestResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No open request matches the ID for this caller.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                notFound:
+                  value: { message: "feedback request not found" }
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -1935,3 +2100,84 @@ components:
             created_at: "2026-08-18T10:00:00Z"
             updated_at: "2026-08-18T10:00:00Z"
         next_cursor: null
+
+    FeedbackRequestStatus:
+      type: string
+      description: |
+        The lifecycle state of a feedback request. `open` requests are still
+        awaiting feedback; `completed` requests were fulfilled (the requestee
+        submitted feedback for the requester in the request's period);
+        `declined` requests were explicitly declined by the requestee.
+      enum:
+        - open
+        - completed
+        - declined
+      examples:
+        - open
+
+    CreateFeedbackRequestRequest:
+      type: object
+      description: |
+        Request body for `POST /v1/feedback-requests`. The requester is taken
+        from the JWT and `requester_id` in the body is ignored.
+      properties:
+        requestee_id:
+          type: string
+          format: uuid
+          description: The employee being asked for feedback. Must exist, belong to the requester's organization, and differ from the requester.
+        period_id:
+          type: string
+          format: uuid
+          description: Must refer to an existing feedback period. The period's date window is not enforced at request time.
+      required: [requestee_id, period_id]
+      example:
+        requestee_id: 0190bbbb-0000-7000-8000-000000000000
+        period_id: 0190abcd-0000-7000-8000-000000000000
+
+    FeedbackRequestResponse:
+      type: object
+      description: A feedback request.
+      properties:
+        id:
+          type: string
+          format: uuid
+        requester_id:
+          type: string
+          format: uuid
+          description: The employee who asked for feedback (from the JWT).
+        requestee_id:
+          type: string
+          format: uuid
+          description: The employee being asked for feedback.
+        period_id:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/FeedbackRequestStatus"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required: [id, requester_id, requestee_id, period_id, status, created_at, updated_at]
+
+    FeedbackRequestListResponse:
+      type: object
+      description: |
+        One page of the caller's feedback requests plus the next-page cursor.
+        Which side is listed depends on the `direction` query parameter.
+      properties:
+        requests:
+          type: array
+          description: The caller's requests on this page, ordered by created_at descending. Never null (empty array when the caller has none).
+          items:
+            $ref: "#/components/schemas/FeedbackRequestResponse"
+        next_cursor:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            The ID of the last request on this page; pass it as `cursor` on
+            the next request. Null when there are no more pages.
+      required: [requests, next_cursor]
